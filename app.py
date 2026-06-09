@@ -330,6 +330,15 @@ with st.sidebar:
     choice = st.radio("選單導覽", menu_options)
     
     st.write("---")
+    st.markdown("### 📅 資料庫最新期數")
+    col_s_m = get_latest_month()
+    col_s_pe = get_latest_pe_date()
+    col_s_y, col_s_q = get_latest_quarter()
+    st.caption(f"📅 最新營收月份: **{col_s_m or '無資料'}**")
+    st.caption(f"📅 最新本益比日期: **{col_s_pe or '無資料'}**")
+    st.caption(f"📅 最新財報季度: **{f'{col_s_y} Q{col_s_q}' if col_s_y else '無資料'}**")
+    
+    st.write("---")
     st.markdown("### 🔑 API 金鑰配置")
     
     # 優先嘗試從 env 取得
@@ -836,6 +845,25 @@ elif choice == "🔍 同業營收篩選":
                 if cached_report:
                     st.success("已載入快取的 AI 分析報告")
                     st.markdown(cached_report)
+                    st.write("---")
+                    if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_industry_{selected_month}_{selected_industry}"):
+                        api_key = st.session_state.get('api_key_input')
+                        if not api_key:
+                            st.error("請先在側邊欄配置您的 Gemini API Key！")
+                        else:
+                            with st.spinner("Gemini 正在分析同業財報數據並編寫報告，請稍候..."):
+                                report = analyze_industry_outliers(
+                                    api_key=api_key,
+                                    db_path=None,
+                                    date_month=selected_month,
+                                    industry_name=selected_industry,
+                                    use_refined=use_refined
+                                )
+                                if "失敗" in report or "未設定" in report or "error" in report.lower():
+                                    st.error(handle_gemini_error(report))
+                                else:
+                                    st.success("✔ 報告已成功更新！")
+                                    st.rerun()
                 else:
                     st.info("此產業與月份尚未產生 AI 分析報告。")
                     if st.button("🔮 召喚 Gemini 進行同業深度分析"):
@@ -1046,6 +1074,24 @@ elif choice == "📈 季報三率分析":
                 if cached_report:
                     st.success("已載入快取的 AI 季報分析報告")
                     st.markdown(cached_report)
+                    st.write("---")
+                    if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_quarterly_{year}_Q{quarter}"):
+                        api_key = st.session_state.get('api_key_input')
+                        if not api_key:
+                            st.error("請先在側邊欄配置您的 Gemini API Key！")
+                        else:
+                            with st.spinner("Gemini 正在彙總全市場財報並撰寫獲利分析報告，請稍候..."):
+                                report = analyze_quarterly_financial_trends(
+                                    api_key=api_key,
+                                    db_path=None,
+                                    year=year,
+                                    quarter=quarter
+                                )
+                                if "失敗" in report or "未設定" in report or "error" in report.lower():
+                                    st.error(handle_gemini_error(report))
+                                else:
+                                    st.success("✔ 報告已成功更新！")
+                                    st.rerun()
                 else:
                     st.info("此季度財報尚未產生 AI 分析報告。")
                     if st.button("🔮 召喚 Gemini 進行季度財報深度大解析"):
@@ -1080,6 +1126,19 @@ elif choice == "🔮 潛力轉盈股分析":
     if cached_turnaround_list:
         st.success("已載入當月的 AI 潛力轉虧為盈分析報告。")
         st.markdown(cached_turnaround_list)
+        st.write("---")
+        if st.button("🔄 重新分析並更新 (即時更新)", key='re_run_turnaround_analysis'):
+            api_key = st.session_state.get('api_key_input')
+            if not api_key:
+                st.error("請先在側邊欄配置您的 Gemini API Key！")
+            else:
+                with st.spinner("Gemini 正在從資料庫篩選虧損股、聯網搜尋最新動態並撰寫深度報告，請稍候... (這可能需要 20-30 秒)"):
+                    report = analyze_turnaround_stocks(api_key, db_path=None)
+                    if "失敗" in report or "未設定" in report or "error" in report.lower():
+                        st.error(handle_gemini_error(report))
+                    else:
+                        st.success("✔ 報告已成功更新！")
+                        st.rerun()
     else:
         st.info("尚未產生當月的潛力轉虧為盈分析報告。")
         if st.button("🔮 執行轉虧為盈潛力股大掃描與 AI 分析", key='run_turnaround_analysis'):
@@ -1088,7 +1147,6 @@ elif choice == "🔮 潛力轉盈股分析":
                 st.error("請先在側邊欄配置您的 Gemini API Key！")
             else:
                 with st.spinner("Gemini 正在從資料庫篩選虧損股、聯網搜尋最新動態並撰寫深度報告，請稍候... (這可能需要 20-30 秒)"):
-                    from gemini_service import analyze_turnaround_stocks
                     report = analyze_turnaround_stocks(api_key, db_path=None)
                     if "失敗" in report or "未設定" in report or "error" in report.lower():
                         st.error(handle_gemini_error(report))
@@ -1117,6 +1175,23 @@ elif choice == "🤖 Gemini AI 投資顧問":
             if cached_report:
                 st.success("已載入快取的 AI 月度營收策略報告")
                 st.markdown(cached_report)
+                st.write("---")
+                if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_monthly_market_{selected_month}"):
+                    api_key = st.session_state.get('api_key_input')
+                    if not api_key:
+                        st.error("請先在側邊欄配置您的 Gemini API Key！")
+                    else:
+                        with st.spinner("Gemini 正在運算數據並撰寫策略報告，這可能需要 15-20 秒..."):
+                            report = analyze_monthly_market_trends(
+                                api_key=api_key,
+                                db_path=None,
+                                date_month=selected_month
+                            )
+                            if "失敗" in report or "未設定" in report or "error" in report.lower():
+                                st.error(handle_gemini_error(report))
+                            else:
+                                st.success("✔ 報告已成功更新！")
+                                st.rerun()
             else:
                 st.info("此月份營收尚未產生 AI 策略報告。")
                 if st.button("🔮 產生大盤營收趨勢策略報告"):
@@ -1218,6 +1293,19 @@ elif choice == "🤖 Gemini AI 投資顧問":
         if cached_conf_report:
             st.success(f"已載入 {current_year} 年度的 AI 法說會智慧分析報告")
             report_placeholder.markdown(cached_conf_report)
+            st.write("---")
+            if st.button("🔄 重新分析並更新 (即時更新)", key='re_conf_report_button'):
+                api_key = st.session_state.get('api_key_input')
+                if not api_key:
+                    st.error("請先在側邊欄配置您的 Gemini API Key！")
+                else:
+                    with st.spinner("Gemini 正在搜尋最新法說紀錄、逐字稿及重訊並編寫報告，這可能需要 20-30 秒..."):
+                        report = analyze_investor_conferences(api_key, db_path=None)
+                        if "失敗" in report or "未設定" in report or "error" in report.lower():
+                            st.error(handle_gemini_error(report))
+                        else:
+                            st.success("✔ 報告已成功更新！")
+                            st.rerun()
         else:
             st.info(f"尚未產生 {current_year} 年度的法說會智慧分析報告。")
             if st.button("🔮 執行當年度法說會與產業展望分析", key='conf_report_button'):

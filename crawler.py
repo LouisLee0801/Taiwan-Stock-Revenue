@@ -1,6 +1,6 @@
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 from io import StringIO
 
@@ -136,7 +136,46 @@ def fetch_monthly_revenue():
     except Exception as e:
         print(f"Error fetching TPEx monthly revenue: {e}")
         
-    return records
+    # 3. 自動回補最近兩個月的實時 HTML 月度營收
+    now = datetime.now()
+    # M-1
+    prev_y1, prev_m1 = now.year, now.month - 1
+    if prev_m1 == 0:
+        prev_y1, prev_m1 = now.year - 1, 12
+    # M-2
+    prev_y2, prev_m2 = prev_y1, prev_m1 - 1
+    if prev_m2 == 0:
+        prev_y2, prev_m2 = prev_y1 - 1, 12
+
+    print(f"Auto-fetching MOPS HTML revenue for {prev_y1}-{prev_m1:02d}...")
+    try:
+        html_records1 = fetch_historical_monthly_revenue(prev_y1, prev_m1)
+        if html_records1:
+            records.extend(html_records1)
+            print(f"Added {len(html_records1)} records for {prev_y1}-{prev_m1:02d} from MOPS HTML.")
+    except Exception as e:
+        print(f"Error auto-fetching MOPS HTML revenue for {prev_y1}-{prev_m1:02d}: {e}")
+
+    print(f"Auto-fetching MOPS HTML revenue for {prev_y2}-{prev_m2:02d}...")
+    try:
+        html_records2 = fetch_historical_monthly_revenue(prev_y2, prev_m2)
+        if html_records2:
+            records.extend(html_records2)
+            print(f"Added {len(html_records2)} records for {prev_y2}-{prev_m2:02d} from MOPS HTML.")
+    except Exception as e:
+        print(f"Error auto-fetching MOPS HTML revenue for {prev_y2}-{prev_m2:02d}: {e}")
+
+    # 去除重複項並保留非空/較新的資料
+    seen = {}
+    for r in records:
+        key = (r['date_month'], r['stock_code'])
+        if key not in seen:
+            seen[key] = r
+        else:
+            if r.get('revenue') is not None or seen[key].get('revenue') is None:
+                seen[key] = r
+                
+    return list(seen.values())
 
 def fetch_daily_pe():
     """
@@ -146,30 +185,67 @@ def fetch_daily_pe():
     records = []
     
     # 1. 上市公司 PE/PB/DY (TWSE)
-    twse_url = 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL'
-    print("Fetching TWSE daily PE/PB/DY...")
-    try:
-        r = requests.get(twse_url, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            print(f"TWSE PE: retrieved {len(data)} records.")
-            for row in data:
-                date = convert_roc_date(row.get('Date'))
-                if not date:
-                    continue
-                
-                records.append({
-                    'date': date,
-                    'stock_code': str(row.get('Code', '')).strip(),
-                    'stock_name': str(row.get('Name', '')).strip(),
-                    'pe': clean_float(row.get('PEratio')),
-                    'dy': clean_float(row.get('DividendYield')),
-                    'pb': clean_float(row.get('PBratio'))
-                })
-        else:
-            print(f"TWSE PE failed. Status code: {r.status_code}")
-    except Exception as e:
-        print(f"Error fetching TWSE PE: {e}")
+    # 優先嘗試爬取官方最新交易日 JSON API (BWIBBU_d)
+    twse_success = False
+    today = datetime.now().date()
+    for i in range(5):
+        target_date = today - timedelta(days=i)
+        date_str = target_date.strftime("%Y%m%d")
+        date_formatted = f"{target_date.year:04d}-{target_date.month:02d}-{target_date.day:02d}"
+        url = f"https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date={date_str}"
+        print(f"Trying to fetch TWSE PE for {date_formatted} from {url}...")
+        try:
+            r = requests.get(url, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                stat = data.get("stat", "")
+                if stat == "OK" and data.get("data"):
+                    print(f"Successfully fetched TWSE PE for {date_formatted} from JSON API. Total records: {len(data['data'])}")
+                    for row in data['data']:
+                        # row[0]: Code, row[1]: Name, row[3]: DividendYield, row[5]: PEratio, row[6]: PBratio
+                        records.append({
+                            'date': date_formatted,
+                            'stock_code': str(row[0]).strip(),
+                            'stock_name': str(row[1]).strip(),
+                            'pe': clean_float(row[5]),
+                            'dy': clean_float(row[3]),
+                            'pb': clean_float(row[6])
+                        })
+                    twse_success = True
+                    break
+                else:
+                    print(f"TWSE PE JSON API for {date_formatted} returned status: {stat} (No data)")
+            else:
+                print(f"TWSE PE JSON API for {date_formatted} HTTP status: {r.status_code}")
+        except Exception as e:
+            print(f"Error fetching TWSE PE JSON API for {date_formatted}: {e}")
+
+    # 如果 JSON API 失敗，退回 OpenAPI (BWIBBU_ALL)
+    if not twse_success:
+        print("Falling back to TWSE OpenAPI for daily PE...")
+        twse_url = 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL'
+        try:
+            r = requests.get(twse_url, timeout=20)
+            if r.status_code == 200:
+                data = r.json()
+                print(f"TWSE PE OpenAPI: retrieved {len(data)} records.")
+                for row in data:
+                    date = convert_roc_date(row.get('Date'))
+                    if not date:
+                        continue
+                    
+                    records.append({
+                        'date': date,
+                        'stock_code': str(row.get('Code', '')).strip(),
+                        'stock_name': str(row.get('Name', '')).strip(),
+                        'pe': clean_float(row.get('PEratio')),
+                        'dy': clean_float(row.get('DividendYield')),
+                        'pb': clean_float(row.get('PBratio'))
+                    })
+            else:
+                print(f"TWSE PE OpenAPI failed. Status code: {r.status_code}")
+        except Exception as e:
+            print(f"Error fetching TWSE PE OpenAPI: {e}")
 
     # 2. 上櫃公司 PE/PB/DY (TPEx)
     tpex_url = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis'
@@ -197,7 +273,17 @@ def fetch_daily_pe():
     except Exception as e:
         print(f"Error fetching TPEx PE: {e}")
         
-    return records
+    # 去除重複項並保留最新且非空的資料
+    seen = {}
+    for r in records:
+        key = (r['date'], r['stock_code'])
+        if key not in seen:
+            seen[key] = r
+        else:
+            if r.get('pe') is not None or seen[key].get('pe') is None:
+                seen[key] = r
+                
+    return list(seen.values())
 
 def fetch_quarterly_financials():
     """
