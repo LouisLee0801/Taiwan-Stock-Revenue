@@ -245,16 +245,23 @@ def get_monthly_revenues_with_pe(date_month, db_path=DEFAULT_DB_PATH):
     conn = get_connection(db_path)
     cursor = conn.cursor()
     
-    # 檢查該月份月底或之前是否有本益比記錄
-    month_end_date = f"{date_month}-31"
-    cursor.execute('''
-        SELECT COUNT(1) FROM daily_pe 
-        WHERE date <= ?
-    ''', (month_end_date,))
-    has_pe_before = cursor.fetchone()[0] > 0
+    # 獲取資料庫中最新的營收月份
+    cursor.execute('SELECT MAX(date_month) FROM monthly_revenue')
+    max_month_res = cursor.fetchone()
+    max_month = max_month_res[0] if max_month_res else None
     
-    # 如果有，限制日期在該月底前；如果沒有，不限制日期（取得全表最新估值，適合回補歷史營收的情形）
-    limit_date = month_end_date if has_pe_before else "9999-12-31"
+    if date_month == max_month:
+        # 如果是最新月份，不限制本益比日期，直接取得最新的估值資料
+        limit_date = "9999-12-31"
+    else:
+        # 檢查該月份月底或之前是否有本益比記錄
+        month_end_date = f"{date_month}-31"
+        cursor.execute('''
+            SELECT COUNT(1) FROM daily_pe 
+            WHERE date <= ?
+        ''', (month_end_date,))
+        has_pe_before = cursor.fetchone()[0] > 0
+        limit_date = month_end_date if has_pe_before else "9999-12-31"
     
     # 使用 Window Function ROW_NUMBER() 取得各個個股在限制日期前的最新一筆估值數據
     # 這樣可以解決上市 (TWSE) 與上櫃 (TPEx) 日本益比日期不對齊、以及歷史月份無當月 PE 數據的問題

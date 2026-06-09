@@ -604,11 +604,26 @@ def analyze_investor_conferences(api_key, db_path=None):
         response = model_with_search.generate_content(prompt)
         report_content = response.text
         if not report_content or not report_content.strip():
-            return "Gemini 產生法說會分析報告失敗: API 傳回空內容。這可能是因為安全過濾器阻擋、搜尋失敗，或金鑰餘額不足。請確認 API 金鑰狀態。"
+            raise ValueError("API returned empty content")
         save_gemini_report('investor_conferences', current_date_str[:7], report_content, db_path=db_path)
         return report_content
     except Exception as e:
-        return f"Gemini 產生法說會分析報告失敗: {e}"
+        print(f"Search grounding failed for investor conferences: {e}. Falling back...")
+        try:
+            model_no_search = get_vertex_model(api_key, enable_search=False)
+            if not model_no_search:
+                return f"Gemini 產生法說會分析報告失敗: {e}"
+            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據您對當前台股產業（如 AI 伺服器、先進封裝 CoWoS、光通訊 CPO、重電綠能等）的法說會趨勢與宏觀知識，為我撰寫這份報告。"
+            response_fallback = model_no_search.generate_content(fallback_prompt)
+            fallback_content = response_fallback.text
+            if fallback_content and fallback_content.strip():
+                save_gemini_report('investor_conferences', current_date_str[:7], fallback_content, db_path=db_path)
+                notice = "⚠️ **提示：由於 API 聯網搜尋功能不可用，本報告已自動退回使用「AI 產業模型預訓練知識」進行大趨勢解析。**\n\n"
+                return notice + fallback_content
+            else:
+                return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析亦無回應。"
+        except Exception as fallback_err:
+            return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
 
 def analyze_turnaround_stocks(api_key, db_path=None):
     """
@@ -689,9 +704,24 @@ def analyze_turnaround_stocks(api_key, db_path=None):
         response = model_with_search.generate_content(prompt)
         report_content = response.text
         if not report_content or not report_content.strip():
-            return "Gemini 產生轉盈股分析報告失敗: API 傳回空內容。這可能是因為安全過濾器阻擋、搜尋失敗，或金鑰餘額不足。請確認 API 金鑰狀態。"
+            raise ValueError("API returned empty content")
         # 快取報告
         save_gemini_report('turnaround_list', current_date_str[:7], report_content, db_path=db_path)
         return report_content
     except Exception as e:
-        return f"Gemini 產生轉盈股分析報告失敗: {e}"
+        print(f"Search grounding failed for turnaround stocks: {e}. Falling back...")
+        try:
+            model_no_search = get_vertex_model(api_key, enable_search=False)
+            if not model_no_search:
+                return f"Gemini 產生轉盈股分析報告失敗: {e}"
+            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據上述提供的本地資料庫數據（EPS、月營收 YoY 等）與您對這些公司的認知進行基本面深度分析。"
+            response_fallback = model_no_search.generate_content(fallback_prompt)
+            fallback_content = response_fallback.text
+            if fallback_content and fallback_content.strip():
+                save_gemini_report('turnaround_list', current_date_str[:7], fallback_content, db_path=db_path)
+                notice = "⚠️ **提示：由於 API 聯網搜尋功能不可用，本報告已自動退回使用「本地資料庫數據」進行基本面分析。**\n\n"
+                return notice + fallback_content
+            else:
+                return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析亦無回應。"
+        except Exception as fallback_err:
+            return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
