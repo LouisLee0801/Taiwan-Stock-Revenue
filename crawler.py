@@ -387,98 +387,103 @@ def parse_mops_revenue_from_html(year, month, market='sii'):
     從舊版公開資訊觀測站 (mopsov) 靜態 HTML 中解析月度營收表格。
     """
     roc_year = year - 1911
-    url = f'https://mopsov.twse.com.tw/nas/t21/{market}/t21sc03_{roc_year}_{month}_0.html'
+    records = []
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
-    r = requests.get(url, headers=headers, timeout=20)
-    if r.status_code != 200:
-        print(f"MOPS HTML {url} returned status code: {r.status_code}")
-        return []
-        
-    r.encoding = 'big5'
-    
-    # 處理 Pandas read_html 解析
-    dfs = pd.read_html(StringIO(r.text))
-    records = []
-    current_industry = '未知'
-    
-    for df in dfs:
-        found_industry = False
-        
-        # 1. 檢查欄位名稱 (headers) 是否包含產業別
-        cols_to_check = []
-        if isinstance(df.columns, pd.MultiIndex):
-            for col in df.columns:
-                cols_to_check.extend([str(c) for c in col])
-        else:
-            cols_to_check = [str(c) for c in df.columns]
+    # 循環爬取 _0, _1, _2 ... 直到找不到檔案 (404) 為止
+    for page_idx in range(5):
+        url = f'https://mopsov.twse.com.tw/nas/t21/{market}/t21sc03_{roc_year}_{month}_{page_idx}.html'
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            if r.status_code != 200:
+                break
+        except Exception as e:
+            print(f"Error fetching MOPS HTML {url}: {e}")
+            break
             
-        for col_str in cols_to_check:
-            if '產業別：' in col_str:
-                match = re.search(r'產業別：([^\s\xa0\n]+)', col_str)
-                if match:
-                    current_industry = match.group(1).strip()
-                    if '單位' in current_industry:
-                        current_industry = current_industry.split('單位')[0]
-                    elif '單' in current_industry:
-                        current_industry = current_industry.split('單')[0]
-                    found_industry = True
-                    break
+        r.encoding = 'big5'
         
-        # 2. 檢查儲存格內容
-        if not found_industry:
-            for col in df.columns:
-                for val in df[col]:
-                    val_str = str(val)
-                    if '產業別：' in val_str:
-                        match = re.search(r'產業別：([^\s\xa0\n]+)', val_str)
-                        if match:
-                            current_industry = match.group(1).strip()
-                            if '單位' in current_industry:
-                                current_industry = current_industry.split('單位')[0]
-                            elif '單' in current_industry:
-                                current_industry = current_industry.split('單')[0]
-                            found_industry = True
-                            break
-                if found_industry:
-                    break
+        # 處理 Pandas read_html 解析
+        dfs = pd.read_html(StringIO(r.text))
+        current_industry = '未知'
         
-        if found_industry:
-            continue
+        for df in dfs:
+            found_industry = False
             
-        # 判斷是否為數據表格
-        col_str = str(df.columns.tolist())
-        if '公司 代號' in col_str or '公司代號' in col_str:
+            # 1. 檢查欄位名稱 (headers) 是否包含產業別
+            cols_to_check = []
             if isinstance(df.columns, pd.MultiIndex):
-                flat_cols = []
                 for col in df.columns:
-                    flat_cols.append(col[1] if col[1] else col[0])
-                df.columns = flat_cols
+                    cols_to_check.extend([str(c) for c in col])
+            else:
+                cols_to_check = [str(c) for c in df.columns]
                 
-            df.columns = [str(c).replace(' ', '') for c in df.columns]
+            for col_str in cols_to_check:
+                if '產業別：' in col_str:
+                    match = re.search(r'產業別：([^\s\xa0\n]+)', col_str)
+                    if match:
+                        current_industry = match.group(1).strip()
+                        if '單位' in current_industry:
+                            current_industry = current_industry.split('單位')[0]
+                        elif '單' in current_industry:
+                            current_industry = current_industry.split('單')[0]
+                        found_industry = True
+                        break
             
-            for _, row in df.iterrows():
-                code = str(row.get('公司代號', '')).strip()
-                if not code or code == 'nan' or '合計' in code or '合計' in str(row.get('公司名稱', '')):
-                    continue
+            # 2. 檢查儲存格內容
+            if not found_industry:
+                for col in df.columns:
+                    for val in df[col]:
+                        val_str = str(val)
+                        if '產業別：' in val_str:
+                            match = re.search(r'產業別：([^\s\xa0\n]+)', val_str)
+                            if match:
+                                current_industry = match.group(1).strip()
+                                if '單位' in current_industry:
+                                    current_industry = current_industry.split('單位')[0]
+                                elif '單' in current_industry:
+                                    current_industry = current_industry.split('單')[0]
+                                found_industry = True
+                                break
+                    if found_industry:
+                        break
+            
+            if found_industry:
+                continue
                 
-                if not re.match(r'^\d+$', code):
-                    continue
+            # 判斷是否為數據表格
+            col_str = str(df.columns.tolist())
+            if '公司 代號' in col_str or '公司代號' in col_str:
+                if isinstance(df.columns, pd.MultiIndex):
+                    flat_cols = []
+                    for col in df.columns:
+                        flat_cols.append(col[1] if col[1] else col[0])
+                    df.columns = flat_cols
                     
-                records.append({
-                    'date_month': f"{year}-{month:02d}",
-                    'stock_code': code,
-                    'stock_name': str(row.get('公司名稱', '')).strip(),
-                    'industry': current_industry,
-                    'revenue': clean_float(row.get('當月營收')),
-                    'last_month_revenue': clean_float(row.get('上月營收')),
-                    'last_year_revenue': clean_float(row.get('去年當月營收')),
-                    'mom': clean_float(row.get('上月比較增減(%)') or row.get('上月比較增減')),
-                    'yoy': clean_float(row.get('去年同月增減(%)') or row.get('去年同月增減')),
-                    'cum_revenue': clean_float(row.get('當月累計營收')),
-                    'cum_yoy': clean_float(row.get('前期比較增減(%)') or row.get('前期比較增減')),
-                    'notes': str(row.get('備註', '')).strip() if pd.notna(row.get('備註')) else ''
-                })
+                df.columns = [str(c).replace(' ', '') for c in df.columns]
+                
+                for _, row in df.iterrows():
+                    code = str(row.get('公司代號', '')).strip()
+                    if not code or code == 'nan' or '合計' in code or '合計' in str(row.get('公司名稱', '')):
+                        continue
+                    
+                    if not re.match(r'^\d+$', code):
+                        continue
+                        
+                    records.append({
+                        'date_month': f"{year}-{month:02d}",
+                        'stock_code': code,
+                        'stock_name': str(row.get('公司名稱', '')).strip(),
+                        'industry': current_industry,
+                        'revenue': clean_float(row.get('當月營收')),
+                        'last_month_revenue': clean_float(row.get('上月營收')),
+                        'last_year_revenue': clean_float(row.get('去年當月營收')),
+                        'mom': clean_float(row.get('上月比較增減(%)') or row.get('上月比較增減')),
+                        'yoy': clean_float(row.get('去年同月增減(%)') or row.get('去年同月增減')),
+                        'cum_revenue': clean_float(row.get('當月累計營收')),
+                        'cum_yoy': clean_float(row.get('前期比較增減(%)') or row.get('前期比較增減')),
+                        'notes': str(row.get('備註', '')).strip() if pd.notna(row.get('備註')) else ''
+                    })
                 
     return records
 

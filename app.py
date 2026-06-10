@@ -432,7 +432,7 @@ if choice == "📊 大盤營收概覽":
                 <div class="stCard">
                     <div style="color: #64748B; font-size: 0.9rem;">全市場總營收</div>
                     <div class="metric-value">{total_rev/100000.0:,.2f} 億元</div>
-                    <div style="color: #64748B; font-size: 0.8rem;">上市櫃公司總和</div>
+                    <div style="color: #64748B; font-size: 0.8rem;">已申報上市櫃公司加總<br><span style="color: #F59E0B; font-size: 0.75rem;">⚠️ 每月 10 號前為實時公告加總</span></div>
                 </div>
                 """, unsafe_allow_html=True)
             with col2:
@@ -600,7 +600,48 @@ elif choice == "🔍 同業營收篩選":
                 
             # 取得該月份所有的產業清單
             industries = sorted(df_month['display_industry'].dropna().unique().tolist())
-            selected_industry = st.selectbox("選擇要比較的同業別", industries, index=0)
+            
+            # 初始化 session state 中的選取值
+            if 'selected_industry_val' not in st.session_state:
+                st.session_state.selected_industry_val = industries[0] if industries else None
+            elif st.session_state.selected_industry_val not in industries and industries:
+                st.session_state.selected_industry_val = industries[0]
+                
+            if 'last_selected_stock' not in st.session_state:
+                st.session_state.last_selected_stock = "-- 🔍 輸入或選擇個股查詢同業 --"
+                
+            col_search_stock, col_select_industry = st.columns(2)
+            
+            with col_search_stock:
+                stock_list = ["-- 🔍 輸入或選擇個股查詢同業 --"] + sorted([f"{row['stock_code']} {row['stock_name']}" for _, row in df_month.iterrows()])
+                selected_stock_query = st.selectbox(
+                    "🔍 透過個股快速定位同業",
+                    stock_list,
+                    index=0,
+                    help="選擇或輸入個股，系統將自動為您選取該個股所屬的同業別進行比較。"
+                )
+                
+            # 當選取的個股與上次不同時，更新產業
+            if selected_stock_query != st.session_state.last_selected_stock:
+                st.session_state.last_selected_stock = selected_stock_query
+                if selected_stock_query != "-- 🔍 輸入或選擇個股查詢同業 --":
+                    code = selected_stock_query.split(" ")[0]
+                    stock_row = df_month[df_month['stock_code'] == code]
+                    if not stock_row.empty:
+                        target_ind = stock_row.iloc[0]['display_industry']
+                        if target_ind in industries:
+                            st.session_state.selected_industry_val = target_ind
+                            
+            with col_select_industry:
+                default_idx = 0
+                if st.session_state.selected_industry_val in industries:
+                    default_idx = industries.index(st.session_state.selected_industry_val)
+                selected_industry = st.selectbox(
+                    "選擇要比較的同業別",
+                    industries,
+                    index=default_idx
+                )
+                st.session_state.selected_industry_val = selected_industry
             
             if selected_industry:
                 # 篩選該產業的股票
@@ -841,10 +882,10 @@ elif choice == "🔍 同業營收篩選":
                 
                 # 檢查快取
                 cached_report = get_gemini_report('monthly_industry', f"{selected_month}_{selected_industry}")
-                
+                report_placeholder = st.empty()
                 if cached_report:
                     st.success("已載入快取的 AI 分析報告")
-                    st.markdown(cached_report)
+                    report_placeholder.markdown(cached_report)
                     st.write("---")
                     if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_industry_{selected_month}_{selected_industry}"):
                         api_key = st.session_state.get('api_key_input')
@@ -862,8 +903,8 @@ elif choice == "🔍 同業營收篩選":
                                 if "失敗" in report or "未設定" in report or "error" in report.lower():
                                     st.error(handle_gemini_error(report))
                                 else:
+                                    report_placeholder.markdown(report)
                                     st.success("✔ 報告已成功更新！")
-                                    st.rerun()
                 else:
                     st.info("此產業與月份尚未產生 AI 分析報告。")
                     if st.button("🔮 召喚 Gemini 進行同業深度分析"):
@@ -899,8 +940,18 @@ elif choice == "📈 季報三率分析":
         st.info("資料庫中尚無季報資料。")
     else:
         season_list = [f"{row['year']} Q{row['quarter']}" for _, row in df_seasons.iterrows()]
-        selected_season = st.selectbox("選擇季度", season_list, index=0)
         
+        col_s_drop, col_s_note = st.columns([2, 3])
+        with col_s_drop:
+            selected_season = st.selectbox("選擇季度", season_list, index=0)
+        with col_s_note:
+            st.markdown("""
+            <div style="font-size: 0.8rem; color: #64748B; padding: 10px; border-left: 3px solid #1E3A8A; margin-top: 5px;">
+                💡 <b>台股季報公告法定截止日</b>：<br>
+                第一季 (Q1): <b>5/15</b> | 第二季 (Q2): <b>8/14</b> | 第三季 (Q3): <b>11/14</b> | 第四季 (Q4年報): <b>次年 3/31</b>
+            </div>
+            """, unsafe_allow_html=True)
+            
         if selected_season:
             year, quarter = map(int, selected_season.replace("Q", "").split())
             
@@ -1071,9 +1122,10 @@ elif choice == "📈 季報三率分析":
                 
                 # 檢查快取
                 cached_report = get_gemini_report('quarterly_market', f"{year}_Q{quarter}")
+                report_placeholder = st.empty()
                 if cached_report:
                     st.success("已載入快取的 AI 季報分析報告")
-                    st.markdown(cached_report)
+                    report_placeholder.markdown(cached_report)
                     st.write("---")
                     if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_quarterly_{year}_Q{quarter}"):
                         api_key = st.session_state.get('api_key_input')
@@ -1090,8 +1142,8 @@ elif choice == "📈 季報三率分析":
                                 if "失敗" in report or "未設定" in report or "error" in report.lower():
                                     st.error(handle_gemini_error(report))
                                 else:
+                                    report_placeholder.markdown(report)
                                     st.success("✔ 報告已成功更新！")
-                                    st.rerun()
                 else:
                     st.info("此季度財報尚未產生 AI 分析報告。")
                     if st.button("🔮 召喚 Gemini 進行季度財報深度大解析"):
@@ -1122,10 +1174,10 @@ elif choice == "🔮 潛力轉盈股分析":
     
     # 檢查快取
     cached_turnaround_list = get_gemini_report('turnaround_list', current_month)
-    
+    report_placeholder = st.empty()
     if cached_turnaround_list:
         st.success("已載入當月的 AI 潛力轉虧為盈分析報告。")
-        st.markdown(cached_turnaround_list)
+        report_placeholder.markdown(cached_turnaround_list)
         st.write("---")
         if st.button("🔄 重新分析並更新 (即時更新)", key='re_run_turnaround_analysis'):
             api_key = st.session_state.get('api_key_input')
@@ -1137,8 +1189,8 @@ elif choice == "🔮 潛力轉盈股分析":
                     if "失敗" in report or "未設定" in report or "error" in report.lower():
                         st.error(handle_gemini_error(report))
                     else:
+                        report_placeholder.markdown(report)
                         st.success("✔ 報告已成功更新！")
-                        st.rerun()
     else:
         st.info("尚未產生當月的潛力轉虧為盈分析報告。")
         if st.button("🔮 執行轉虧為盈潛力股大掃描與 AI 分析", key='run_turnaround_analysis'):
@@ -1172,9 +1224,10 @@ elif choice == "🤖 Gemini AI 投資顧問":
         if selected_month:
             # 檢查快取
             cached_report = get_gemini_report('monthly_market', selected_month)
+            report_placeholder = st.empty()
             if cached_report:
                 st.success("已載入快取的 AI 月度營收策略報告")
-                st.markdown(cached_report)
+                report_placeholder.markdown(cached_report)
                 st.write("---")
                 if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_monthly_market_{selected_month}"):
                     api_key = st.session_state.get('api_key_input')
@@ -1190,8 +1243,8 @@ elif choice == "🤖 Gemini AI 投資顧問":
                             if "失敗" in report or "未設定" in report or "error" in report.lower():
                                 st.error(handle_gemini_error(report))
                             else:
+                                report_placeholder.markdown(report)
                                 st.success("✔ 報告已成功更新！")
-                                st.rerun()
             else:
                 st.info("此月份營收尚未產生 AI 策略報告。")
                 if st.button("🔮 產生大盤營收趨勢策略報告"):
@@ -1304,8 +1357,8 @@ elif choice == "🤖 Gemini AI 投資顧問":
                         if "失敗" in report or "未設定" in report or "error" in report.lower():
                             st.error(handle_gemini_error(report))
                         else:
+                            report_placeholder.markdown(report)
                             st.success("✔ 報告已成功更新！")
-                            st.rerun()
         else:
             st.info(f"尚未產生 {current_year} 年度的法說會智慧分析報告。")
             if st.button("🔮 執行當年度法說會與產業展望分析", key='conf_report_button'):
@@ -1346,6 +1399,15 @@ elif choice == "⚙️ 資料管理中心":
     col_date2.info(f"最新本益比日期: **{get_latest_pe_date() or '無資料'}**")
     latest_y, latest_q = get_latest_quarter()
     col_date3.info(f"最新財報季度: **{f'{latest_y} Q{latest_q}' if latest_y else '無資料'}**")
+    
+    st.markdown("""
+    > 💡 **台灣上市櫃公司財報公告法定截止日提醒**：
+    > *   **第一季季報 (Q1)**：當年度 **5/15** 前
+    > *   **第二季半年報 (Q2)**：當年度 **8/14** 前
+    > *   **第三季季報 (Q3)**：當年度 **11/14** 前
+    > *   **第四季年度年報 (Q4)**：次年度 **3/31** 前
+    > *(如遇假日，申報截止日將順延至下一個工作天。金控公司申報日可能不同)*
+    """)
     
     # 資料爬蟲更新按鈕
     st.write("---")

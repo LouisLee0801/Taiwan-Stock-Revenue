@@ -295,17 +295,29 @@ def analyze_monthly_market_trends(api_key, db_path, date_month):
     top_industries = ind_stats_filtered.sort_values(by='median_yoy', ascending=False).head(5)
     bottom_industries = ind_stats_filtered.sort_values(by='median_yoy', ascending=True).head(5)
     
+    # 找出當月營收 MoM 成長最強與最弱的產業
+    top_industries_mom = ind_stats_filtered.sort_values(by='median_mom', ascending=False).head(5)
+    bottom_industries_mom = ind_stats_filtered.sort_values(by='median_mom', ascending=True).head(5)
+    
     # 找出當月營收 YoY 成長最強的權值股
     large_caps = df[df['revenue'] >= 5000000].sort_values(by='yoy', ascending=False).head(10)
     
     # 格式化統計數據文字
     top_ind_text = []
     for ind, row in top_industries.iterrows():
-        top_ind_text.append(f"- {ind}: YoY中位數 {row['median_yoy']:.1f}%, MoM中位數 {row['median_mom']:.1f} % (共{int(row['count'])}檔)")
+        top_ind_text.append(f"- {ind}: YoY中位數 {row['median_yoy']:.1f}%, MoM中位數 {row['median_mom']:.1f}% (共{int(row['count'])}檔)")
     
     bottom_ind_text = []
     for ind, row in bottom_industries.iterrows():
-        bottom_ind_text.append(f"- {ind}: YoY中位數 {row['median_yoy']:.1f}%, MoM中位數 {row['median_mom']:.1f} % (共{int(row['count'])}檔)")
+        bottom_ind_text.append(f"- {ind}: YoY中位數 {row['median_yoy']:.1f}%, MoM中位數 {row['median_mom']:.1f}% (共{int(row['count'])}檔)")
+        
+    top_ind_mom_text = []
+    for ind, row in top_industries_mom.iterrows():
+        top_ind_mom_text.append(f"- {ind}: MoM中位數 {row['median_mom']:.1f}%, YoY中位數 {row['median_yoy']:.1f}% (共{int(row['count'])}檔)")
+        
+    bottom_ind_mom_text = []
+    for ind, row in bottom_industries_mom.iterrows():
+        bottom_ind_mom_text.append(f"- {ind}: MoM中位數 {row['median_mom']:.1f}%, YoY中位數 {row['median_yoy']:.1f}% (共{int(row['count'])}檔)")
         
     large_caps_text = []
     for _, row in large_caps.iterrows():
@@ -313,11 +325,13 @@ def analyze_monthly_market_trends(api_key, db_path, date_month):
         
     top_ind_str = "\n".join(top_ind_text)
     bottom_ind_str = "\n".join(bottom_ind_text)
+    top_ind_mom_str = "\n".join(top_ind_mom_text)
+    bottom_ind_mom_str = "\n".join(bottom_ind_mom_text)
     large_caps_str = "\n".join(large_caps_text)
         
     current_date_str = datetime.now().strftime("%Y-%m-%d")
     prompt = f"""
-幕僚策略分析師與基本面專家。
+你是一位專業的台股策略分析師與基本面專家。
 當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
 請針對 **{date_month}** 月份台股全體上市櫃公司的營業收入彙總結果，撰寫一份專業的**台股月度營收大盤趨勢與展望報告**。
 
@@ -326,18 +340,27 @@ def analyze_monthly_market_trends(api_key, db_path, date_month):
 - 全市場營收 YoY: {market_yoy:.2f}%
 - 全市場營收 MoM: {market_mom:.2f}%
 
-【當月最亮眼產業（YoY 中位數前 5 名）】
+【當月最亮眼產業（YoY 年增率中位數前 5 名）】
 {top_ind_str}
 
-【當月最疲弱產業（YoY 中位數後 5 名）】
+【當月最疲弱產業（YoY 年增率中位數後 5 名）】
 {bottom_ind_str}
+
+【當月月成長最強產業（MoM 月增率中位數前 5 名）】
+{top_ind_mom_str}
+
+【當月月成長最弱產業（MoM 月增率中位數後 5 名）】
+{bottom_ind_mom_str}
 
 【高營收大型權值股表現優異者】
 {large_caps_str}
 
 請撰寫報告，結構如下：
 1. **大盤月度營收評論**：點評整體上市櫃營收的 YoY 與 MoM 成長狀況，說明當前台灣出口與製造業的景氣位階（擴張、復甦、或衰退放緩）。
-2. **產業強弱勢解析與類股輪動**：詳細解析為何上述最強勢的產業能維持高成長，以及最疲弱的產業面臨何種瓶頸（如庫存去化、需求不振）。
+2. **產業強弱對比與排行榜（YoY & MoM）**：
+   - 請明確以 Markdown 表格或條列清單，完整列出當月最亮眼與最疲弱的產業排行榜（YoY 年增率前 5 名與後 5 名，含中位數數據）。
+   - 請明確以 Markdown 表格或條列清單，完整列出當月月成長最強與最弱的產業排行榜（MoM 月增率前 5 名與後 5 名，含中位數數據）。
+   - 詳細解析為何這些強勢產業（如 AI 供應鏈、先進封裝、半導體設備等）能維持高成長，以及最疲弱的產業面臨何種瓶頸（如庫存去化、需求不振）。
 3. **領頭羊權值股評估**：分析大型權值股的營收暴增對大盤的指引意義。
 4. **未來趨勢展望與投資操作指引**：展望未來 1 到 2 季，哪些板塊具有結構性趨勢（如 AI 供應鏈擴散、電子傳統旺季、新技術導入），哪些板塊需要避開？給予投資人具體策略指引。
 
