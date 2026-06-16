@@ -89,6 +89,9 @@ def draw_k_line_chart(stock_code):
 
 def clear_active_dialog_stock():
     st.session_state.active_dialog_stock = None
+    if 'df_key_suffix' not in st.session_state:
+        st.session_state.df_key_suffix = 0
+    st.session_state.df_key_suffix += 1
 
 def on_stock_picker_change():
     if 'detail_stock_select' in st.session_state:
@@ -810,15 +813,17 @@ elif choice == "🔍 同業營收篩選":
                 ]].copy()
                 
                 # 處理行選取觸發彈窗 (在 dataframe 渲染前偵測並清空，避免 StreamlitAPIException)
-                if 'peer_dataframe' in st.session_state and st.session_state.peer_dataframe.get('selection', {}).get('rows'):
-                    selected_row_idx = st.session_state.peer_dataframe['selection']['rows'][0]
+                suffix = st.session_state.get('df_key_suffix', 0)
+                df_key = f"peer_dataframe_{suffix}"
+                if df_key in st.session_state and st.session_state[df_key].get('selection', {}).get('rows'):
+                    selected_row_idx = st.session_state[df_key]['selection']['rows'][0]
                     if selected_row_idx < len(df_ind):
                         selected_stock_code = df_ind.iloc[selected_row_idx]['stock_code']
                         selected_stock_name = df_ind.iloc[selected_row_idx]['stock_name']
                         st.session_state.active_dialog_stock = (selected_stock_code, selected_stock_name)
                     
                     # 在渲染前清空狀態
-                    st.session_state.peer_dataframe = {"selection": {"rows": [], "columns": []}}
+                    st.session_state[df_key] = {"selection": {"rows": [], "columns": []}}
                 
                 # 重新命名欄位名稱以提供友善中文表頭
                 df_styled_base = df_display.rename(columns={
@@ -859,7 +864,7 @@ elif choice == "🔍 同業營收篩選":
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
-                    key="peer_dataframe"
+                    key=df_key
                 )
                 
                 st.caption("💡 提示：您可以直接**點擊表格中的任一列**，或者使用下方選單，來開啟該個股的「聯網 AI 深度解析與日 K 線圖」！")
@@ -1412,7 +1417,7 @@ elif choice == "⚙️ 資料管理中心":
     # 資料爬蟲更新按鈕
     st.write("---")
     st.markdown("### 📥 資料更新與爬取操作")
-    st.write("此操作將透過證交所 (TWSE) 與櫃買中心 (TPEx) 的 OpenAPI 抓取最新一期的資料並儲存於本地資料庫中。此 API 由官方維護，無需使用 API 金鑰即可抓取。")
+    st.write("此操作將同時透過證交所與櫃買中心之 OpenAPI，以及**公開資訊觀測站 (MOPS) 實時 HTML 網頁**，抓取最新交易日的本益比與**當月每天最新公佈的實時月營收**。當天剛公佈的個股最新營收（如台積電等）皆能即時同步抓取更新！")
     
     if st.button("🔄 更新/爬取最新台股數據", key='crawl_button'):
         with st.spinner("正在執行資料爬蟲，請稍候... (這大約需要 30-60 秒)"):

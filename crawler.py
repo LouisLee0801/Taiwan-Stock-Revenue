@@ -427,6 +427,7 @@ def parse_mops_revenue_from_html(year, month, market='sii'):
                             current_industry = current_industry.split('單位')[0]
                         elif '單' in current_industry:
                             current_industry = current_industry.split('單')[0]
+                        current_industry = re.sub(r'[\(（].*$', '', current_industry).strip()
                         found_industry = True
                         break
             
@@ -443,6 +444,7 @@ def parse_mops_revenue_from_html(year, month, market='sii'):
                                     current_industry = current_industry.split('單位')[0]
                                 elif '單' in current_industry:
                                     current_industry = current_industry.split('單')[0]
+                                current_industry = re.sub(r'[\(（].*$', '', current_industry).strip()
                                 found_industry = True
                                 break
                     if found_industry:
