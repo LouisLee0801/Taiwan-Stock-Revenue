@@ -20,7 +20,7 @@ def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=
         model_name = "gemini-3.5-flash"
         
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=api_key, client_options={'api_version': 'v1beta'})
         
         # 進行動態模型選取
         selected_model_name = model_name
@@ -470,6 +470,24 @@ def analyze_quarterly_financial_trends(api_key, db_path, year, quarter):
     except Exception as e:
         return f"Gemini 產生季報報告失敗: {e}"
 
+def get_latest_stock_price(stock_code):
+    """從 yfinance 取得最新股價"""
+    import yfinance as yf
+    try:
+        ticker = f"{stock_code}.TW"
+        df = yf.download(ticker, period="5d", progress=False)
+        if df.empty or len(df) == 0:
+            ticker = f"{stock_code}.TWO"
+            df = yf.download(ticker, period="5d", progress=False)
+        if not df.empty:
+            df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
+            for val in reversed(df['Close'].tolist()):
+                if val is not None and not pd.isna(val):
+                    return float(val)
+    except Exception as e:
+        print(f"Error fetching stock price for {stock_code}: {e}")
+    return None
+
 def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
     """
     使用 Gemini (啟用 Google Search Grounding) 重新查詢個股的詳細資訊。
@@ -485,7 +503,7 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 你是一位專業的台股投資顧問與產業分析師。
 當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
 請針對個股 **{stock_code} {stock_name}**，使用搜尋引擎查詢最新（截至當前時間）的相關資訊，並為我撰寫一份「個股深度解析報告」。
-
+ 
 請務必包含以下項目，不要套用千篇一律的模板，必須結合你搜尋到的真實具體資訊：
 1. **個股介紹**：簡述該公司的核心業務、主要產品、以及在產業鏈中的角色與市佔率。
 2. **最近題材**：分析該股近期最受市場矚目的題材（例如 AI、半導體先進製程、光通訊、重電等最新技術或訂單趨勢）。
@@ -505,7 +523,8 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
         if report_content and report_content.strip():
             return report_content
     except Exception as e:
-        print(f"Search grounding failed for stock details: {e}")
+        error_msg = str(e)
+        print(f"Search grounding failed for stock details: {error_msg}")
         
     # 如果聯網搜尋失敗或空內容，自動退回到無聯網的標準 Gemini 模式 (以本地資料庫數據進行分析)
     try:
@@ -513,22 +532,26 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
         if not model_no_search:
             return "Gemini API 金鑰未設定或初始化失敗，無法查詢個股詳細資訊。"
             
-        # 從資料庫中讀取該個股的本地數據作為 Context 傳給 Gemini，使其能寫出基本面分析
+        # 從資料庫與 yfinance 中讀取即時數據作為 Context 傳給 Gemini
         conn = get_connection(db_path)
         df_rev = pd.read_sql('SELECT date_month, revenue, yoy, mom FROM monthly_revenue WHERE stock_code = ? ORDER BY date_month DESC LIMIT 6', conn, params=(stock_code,))
         df_fin = pd.read_sql('SELECT year, quarter, gross_margin, net_margin, eps FROM quarterly_financials WHERE stock_code = ? ORDER BY year DESC, quarter DESC LIMIT 4', conn, params=(stock_code,))
         df_pe = pd.read_sql('SELECT pe, pb, dy FROM daily_pe WHERE stock_code = ? ORDER BY date DESC LIMIT 1', conn, params=(stock_code,))
         conn.close()
         
+        realtime_price = get_latest_stock_price(stock_code)
+        price_str = f"{realtime_price} 元新台幣" if realtime_price else "目前無法取得即時市價"
+        
         local_context = f"""
-【本地資料庫有關 {stock_code} {stock_name} 的財務數據】
-1. 最近 6 個月營收：
+【本地資料庫與即時市價有關 {stock_code} {stock_name} 的財務數據】
+1. 目前即時股價：{price_str} (由 yfinance 取得)
+2. 最近 6 個月營收：
 {df_rev.to_string(index=False)}
 
-2. 最近 4 季獲利與利潤率：
+3. 最近 4 季獲利與利潤率：
 {df_fin.to_string(index=False)}
 
-3. 最新估值指標 (PE/PB/DY)：
+4. 最新估值指標 (PE/PB/DY)：
 {df_pe.to_string(index=False)}
 """
         fallback_prompt = f"""
@@ -541,17 +564,17 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 
 請務必包含以下項目，要求內容扎實、條理分明：
 1. **個股介紹與主要業務**：說明該公司屬於什麼產業，其核心業務是什麼。
-2. **財務數據分析**：分析最近 6 個月營收年增與月增趨勢，以及最近 4 季 EPS、毛利率與淨利率走勢（說明是轉好、惡化還是持平）。
-3. **估值評估 (PE/PB/DY)**：根據其目前的本益比 PE、淨值比 PB 與殖利率 DY，評估其目前的估值位階（偏高、合理或偏低）。
+2. **財務數據分析**：分析最近 6 個月營收年增與增減趨勢，以及最近 4 季 EPS、毛利率與淨利率走勢（說明是轉好、惡化還是持平）。
+3. **估值評估 (PE/PB/DY)**：根據其目前的本益比 PE、淨值比 PB 與殖利率 DY，並結合即時股價 {price_str}，評估其目前的估值位階（偏高、合理或偏低）。
 4. **結論與操作建議**：給予客觀的操作與基本面佈局建議。
 
 請以繁體中文撰寫，以 Markdown 格式呈現。
-並在報告開頭加上友善提示：`⚠️ **提示：由於目前使用的 Gemini API 金鑰為免費版 (Free Tier)，根據 Google 官方規定，免費版金鑰不支援 Google Search Grounding (聯網搜尋) 功能，因此本報告已自動退回使用「本地資料庫數據」進行基本面分析。若欲啟用聯網搜尋，請至 Google AI Studio 綁定信用卡啟用付費版計畫 (Paid Tier) 並重新分析。**`
 """
         response_fallback = model_no_search.generate_content(fallback_prompt)
         fallback_content = response_fallback.text
         if fallback_content and fallback_content.strip():
-            return fallback_content
+            notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據與即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
+            return notice + fallback_content
         else:
             return "Gemini 查詢個股詳細資訊失敗: 聯網搜尋與本地基本面分析均未傳回內容。"
     except Exception as fallback_err:
@@ -631,17 +654,35 @@ def analyze_investor_conferences(api_key, db_path=None):
         save_gemini_report('investor_conferences', current_date_str[:7], report_content, db_path=db_path)
         return report_content
     except Exception as e:
-        print(f"Search grounding failed for investor conferences: {e}. Falling back...")
+        error_msg = str(e)
+        print(f"Search grounding failed for investor conferences: {error_msg}. Falling back...")
         try:
             model_no_search = get_vertex_model(api_key, enable_search=False)
             if not model_no_search:
                 return f"Gemini 產生法說會分析報告失敗: {e}"
-            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據您對當前台股產業（如 AI 伺服器、先進封裝 CoWoS、光通訊 CPO、重電綠能等）的法說會趨勢與宏觀知識，為我撰寫這份報告。"
+                
+            # 取得主要指標股即時市價以利估值計算
+            indicator_stocks = {
+                '2330': '台積電',
+                '2454': '聯發科',
+                '2317': '鴻海',
+                '2382': '廣達',
+                '6669': '緯穎',
+                '5274': '信驊'
+            }
+            prices_str_list = []
+            for code, name in indicator_stocks.items():
+                p = get_latest_stock_price(code)
+                if p:
+                    prices_str_list.append(f"- {code} {name}: 目前即時股價約 {p} 元")
+            prices_context = "\n".join(prices_str_list)
+            
+            fallback_prompt = prompt + f"\n\n【最新指標股即時股價資訊 (供 Forward PE 估值參考)】:\n{prices_context}\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據上述提供的最新即時股價，以及您對這些公司法說會與估值展望的知識，為我撰寫這份報告。"
             response_fallback = model_no_search.generate_content(fallback_prompt)
             fallback_content = response_fallback.text
             if fallback_content and fallback_content.strip():
                 save_gemini_report('investor_conferences', current_date_str[:7], fallback_content, db_path=db_path)
-                notice = "⚠️ **提示：由於目前使用的 Gemini API 金鑰為免費版 (Free Tier)，根據 Google 官方規定，免費版金鑰不支援 Google Search Grounding (聯網搜尋) 功能，本報告已自動退回使用「AI 產業模型預訓練知識」進行大趨勢解析。若欲啟用聯網搜尋，請至 Google AI Studio 綁定信用卡啟用付費版計畫 (Paid Tier) 並重新分析。**\n\n"
+                notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「AI 產業模型預訓練知識與指標股即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
                 return notice + fallback_content
             else:
                 return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析亦無回應。"
@@ -694,8 +735,10 @@ def analyze_turnaround_stocks(api_key, db_path=None):
         
     candidates = []
     for r in rows:
+        price = get_latest_stock_price(r['stock_code'])
+        price_str = f"目前即時股價: {price} 元" if price else "目前即時股價: 暫無"
         candidates.append(
-            f"- {r['stock_code']} {r['stock_name']}: 最新季報 EPS: {r['latest_eps']} 元, 最新月營收 YoY: {r['latest_yoy']:.1f}%"
+            f"- {r['stock_code']} {r['stock_name']} ({price_str}): 最新季報 EPS: {r['latest_eps']} 元, 最新月營收 YoY: {r['latest_yoy']:.1f}%"
         )
     candidates_str = "\n".join(candidates)
     
@@ -732,7 +775,8 @@ def analyze_turnaround_stocks(api_key, db_path=None):
         save_gemini_report('turnaround_list', current_date_str[:7], report_content, db_path=db_path)
         return report_content
     except Exception as e:
-        print(f"Search grounding failed for turnaround stocks: {e}. Falling back...")
+        error_msg = str(e)
+        print(f"Search grounding failed for turnaround stocks: {error_msg}. Falling back...")
         try:
             model_no_search = get_vertex_model(api_key, enable_search=False)
             if not model_no_search:
@@ -742,7 +786,7 @@ def analyze_turnaround_stocks(api_key, db_path=None):
             fallback_content = response_fallback.text
             if fallback_content and fallback_content.strip():
                 save_gemini_report('turnaround_list', current_date_str[:7], fallback_content, db_path=db_path)
-                notice = "⚠️ **提示：由於目前使用的 Gemini API 金鑰為免費版 (Free Tier)，根據 Google 官方規定，免費版金鑰不支援 Google Search Grounding (聯網搜尋) 功能，本報告已自動退回使用「本地資料庫數據」進行基本面分析。若欲啟用聯網搜尋，請至 Google AI Studio 綁定信用卡啟用付費版計畫 (Paid Tier) 並重新分析。**\n\n"
+                notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據與即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
                 return notice + fallback_content
             else:
                 return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析亦無回應。"
