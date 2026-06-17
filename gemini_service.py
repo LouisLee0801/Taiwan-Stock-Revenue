@@ -546,7 +546,7 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 4. **結論與操作建議**：給予客觀的操作與基本面佈局建議。
 
 請以繁體中文撰寫，以 Markdown 格式呈現。
-並在報告開頭加上友善提示：`⚠️ 提示：由於 API 金鑰不支援聯網搜尋工具，本報告已自動退回使用「本地資料庫數據」進行基本面分析。`
+並在報告開頭加上友善提示：`⚠️ **提示：由於目前使用的 Gemini API 金鑰為免費版 (Free Tier)，根據 Google 官方規定，免費版金鑰不支援 Google Search Grounding (聯網搜尋) 功能，因此本報告已自動退回使用「本地資料庫數據」進行基本面分析。若欲啟用聯網搜尋，請至 Google AI Studio 綁定信用卡啟用付費版計畫 (Paid Tier) 並重新分析。**`
 """
         response_fallback = model_no_search.generate_content(fallback_prompt)
         fallback_content = response_fallback.text
@@ -641,7 +641,7 @@ def analyze_investor_conferences(api_key, db_path=None):
             fallback_content = response_fallback.text
             if fallback_content and fallback_content.strip():
                 save_gemini_report('investor_conferences', current_date_str[:7], fallback_content, db_path=db_path)
-                notice = "⚠️ **提示：由於 API 聯網搜尋功能不可用，本報告已自動退回使用「AI 產業模型預訓練知識」進行大趨勢解析。**\n\n"
+                notice = "⚠️ **提示：由於目前使用的 Gemini API 金鑰為免費版 (Free Tier)，根據 Google 官方規定，免費版金鑰不支援 Google Search Grounding (聯網搜尋) 功能，本報告已自動退回使用「AI 產業模型預訓練知識」進行大趨勢解析。若欲啟用聯網搜尋，請至 Google AI Studio 綁定信用卡啟用付費版計畫 (Paid Tier) 並重新分析。**\n\n"
                 return notice + fallback_content
             else:
                 return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析亦無回應。"
@@ -742,7 +742,7 @@ def analyze_turnaround_stocks(api_key, db_path=None):
             fallback_content = response_fallback.text
             if fallback_content and fallback_content.strip():
                 save_gemini_report('turnaround_list', current_date_str[:7], fallback_content, db_path=db_path)
-                notice = "⚠️ **提示：由於 API 聯網搜尋功能不可用，本報告已自動退回使用「本地資料庫數據」進行基本面分析。**\n\n"
+                notice = "⚠️ **提示：由於目前使用的 Gemini API 金鑰為免費版 (Free Tier)，根據 Google 官方規定，免費版金鑰不支援 Google Search Grounding (聯網搜尋) 功能，本報告已自動退回使用「本地資料庫數據」進行基本面分析。若欲啟用聯網搜尋，請至 Google AI Studio 綁定信用卡啟用付費版計畫 (Paid Tier) 並重新分析。**\n\n"
                 return notice + fallback_content
             else:
                 return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析亦無回應。"

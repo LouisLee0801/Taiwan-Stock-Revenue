@@ -910,6 +910,7 @@ elif choice == "🔍 同業營收篩選":
                                 else:
                                     report_placeholder.markdown(report)
                                     st.success("✔ 報告已成功更新！")
+                                    st.rerun()
                 else:
                     st.info("此產業與月份尚未產生 AI 分析報告。")
                     if st.button("🔮 召喚 Gemini 進行同業深度分析"):
@@ -1149,6 +1150,7 @@ elif choice == "📈 季報三率分析":
                                 else:
                                     report_placeholder.markdown(report)
                                     st.success("✔ 報告已成功更新！")
+                                    st.rerun()
                 else:
                     st.info("此季度財報尚未產生 AI 分析報告。")
                     if st.button("🔮 召喚 Gemini 進行季度財報深度大解析"):
@@ -1196,6 +1198,7 @@ elif choice == "🔮 潛力轉盈股分析":
                     else:
                         report_placeholder.markdown(report)
                         st.success("✔ 報告已成功更新！")
+                        st.rerun()
     else:
         st.info("尚未產生當月的潛力轉虧為盈分析報告。")
         if st.button("🔮 執行轉虧為盈潛力股大掃描與 AI 分析", key='run_turnaround_analysis'):
