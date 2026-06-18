@@ -8,17 +8,29 @@ from database import (
     get_connection, save_gemini_industry, save_gemini_report, get_gemini_report
 )
 
+def write_gemini_debug(msg):
+    try:
+        log_path = r"C:\Users\a0919\.gemini\antigravity\scratch\tw-stock-fundamental-analyzer\gemini_debug.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception as e:
+        print(f"Failed to write debug log: {e}")
+
 def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=False):
     """初始化並傳回適合的 Gemini 模式，若型態已棄用則動態選取最新可用型態"""
     if not api_key:
         api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
+        write_gemini_debug("get_gemini_model failed: No API Key provided.")
         return None
         
     # 主動阻斷已棄用的 gemini-1.5-flash 與 gemini-2.0-flash，升級為最新的 3.5-flash
     if model_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
         model_name = "gemini-3.5-flash"
         
+    key_preview = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "invalid_key"
+    write_gemini_debug(f"Configuring Gemini Client. Key: {key_preview}, Target model: {model_name}, Search: {enable_search}")
+    
     try:
         genai.configure(api_key=api_key)
         
@@ -26,6 +38,7 @@ def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=
         selected_model_name = model_name
         try:
             available_models = [m.name for m in genai.list_models()]
+            write_gemini_debug(f"Available models: {available_models}")
             candidates = [
                 'models/gemini-3.5-flash',
                 'models/gemini-3.1-flash-lite',
@@ -38,11 +51,12 @@ def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=
                         selected_model_name = candidate.replace('models/', '')
                         break
         except Exception as list_err:
-            print(f"Could not list models: {list_err}. Falling back to default model_name.")
+            write_gemini_debug(f"Could not list models: {list_err}. Falling back to default model_name.")
             # 如果列表失敗，且預設是已退役的 1.5-flash / 2.0-flash，則直接升級為 3.5-flash
             if selected_model_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
                 selected_model_name = "gemini-3.5-flash"
         
+        write_gemini_debug(f"Selected model name: {selected_model_name}")
         # 如果需要啟用 Google Search Grounding
         if enable_search:
             return genai.GenerativeModel(
@@ -52,7 +66,7 @@ def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=
         else:
             return genai.GenerativeModel(selected_model_name)
     except Exception as e:
-        print(f"Error configuring Gemini client: {e}")
+        write_gemini_debug(f"Error configuring Gemini client: {e}")
         return None
 
 def get_vertex_model(project_id=None, model_name="gemini-3.5-flash", enable_search=False):
@@ -519,14 +533,25 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 注意：請以當前時間視角來回答，搜尋最新資訊，避免提及「記憶體復甦已確立」等已在2024-2025年完成的陳舊分析（除非當前有最新數據），專注於當前的實際狀況。
 """
     try:
+        write_gemini_debug(f"Sending stock details prompt to search-enabled model for {stock_code} {stock_name}...")
         response = model_with_search.generate_content(prompt)
+        write_gemini_debug(f"Response received. Candidates count: {len(response.candidates) if response.candidates else 0}")
+        if response.candidates:
+            c = response.candidates[0]
+            write_gemini_debug(f"Candidate finish reason: {c.finish_reason}")
+            if hasattr(c, 'safety_ratings'):
+                write_gemini_debug(f"Safety ratings: {c.safety_ratings}")
+            if hasattr(c, 'grounding_metadata') and c.grounding_metadata:
+                write_gemini_debug(f"Grounding metadata present: True")
+        
         report_content = response.text
         if not report_content or not report_content.strip():
             raise ValueError("API returned empty content")
+        write_gemini_debug("Response text successfully retrieved.")
         return report_content
     except Exception as e:
         error_msg = str(e)
-        print(f"Search grounding failed for stock details: {error_msg}")
+        write_gemini_debug(f"Search grounding failed for stock details: {error_msg}")
         
     # 如果聯網搜尋失敗或空內容，自動退回到無聯網的標準 Gemini 模式 (以本地資料庫數據進行分析)
     try:
@@ -575,7 +600,8 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
         response_fallback = model_no_search.generate_content(fallback_prompt)
         fallback_content = response_fallback.text
         if fallback_content and fallback_content.strip():
-            notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據與即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
+            search_model_used = getattr(model_with_search, 'model_name', 'unknown-model')
+            notice = f"⚠️ **提示：API 聯網搜尋失敗（使用模型：`{search_model_used}`，詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據與即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
             return notice + fallback_content
         else:
             return "Gemini 查詢個股詳細資訊失敗: 聯網搜尋與本地基本面分析均未傳回內容。"
