@@ -20,7 +20,7 @@ def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=
         model_name = "gemini-3.5-flash"
         
     try:
-        genai.configure(api_key=api_key, client_options={'api_version': 'v1beta'})
+        genai.configure(api_key=api_key)
         
         # 進行動態模型選取
         selected_model_name = model_name
