@@ -493,6 +493,7 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
     使用 Gemini (啟用 Google Search Grounding) 重新查詢個股的詳細資訊。
     包括：個股介紹、最近題材、小作文、法說會資訊、新聞，以及 Forward PE 估值分析。
     """
+    error_msg = "未知聯網錯誤"
     model_with_search = get_vertex_model(api_key, enable_search=True)
     if not model_with_search:
         return "Gemini API 金鑰未設定或初始化失敗，無法查詢個股詳細資訊。"
@@ -520,8 +521,9 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
     try:
         response = model_with_search.generate_content(prompt)
         report_content = response.text
-        if report_content and report_content.strip():
-            return report_content
+        if not report_content or not report_content.strip():
+            raise ValueError("API returned empty content")
+        return report_content
     except Exception as e:
         error_msg = str(e)
         print(f"Search grounding failed for stock details: {error_msg}")
