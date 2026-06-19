@@ -14,7 +14,7 @@ from database import (
     init_db, get_db_stats, get_latest_month, get_latest_pe_date, get_latest_quarter,
     get_monthly_revenues_with_pe, get_quarterly_financials_list, get_refined_industries_map,
     get_gemini_report, save_gemini_report, get_connection, save_monthly_revenues,
-    save_daily_pes, save_quarterly_financials
+    save_daily_pes, save_quarterly_financials, get_gemini_report_details
 )
 from crawler import (
     fetch_monthly_revenue, fetch_daily_pe, fetch_quarterly_financials
@@ -163,6 +163,21 @@ def show_stock_detail_dialog(stock_code, stock_name):
                 st.plotly_chart(fig, use_container_width=True)
                 
     with tab_fin:
+        # 檢查是否需要自動補全歷史季度數據 (少於 4 季則觸發 backfill)
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) as count FROM quarterly_financials WHERE stock_code = ?', (stock_code,))
+            existing_count = cursor.fetchone()['count']
+        except Exception:
+            existing_count = 0
+        conn.close()
+        
+        if existing_count < 4:
+            with st.spinner("正在從 Yahoo Finance 補全歷史季度財報數據 (2025Q4, 2025Q3 等)..."):
+                from database import backfill_quarterly_financials_yfinance
+                backfill_quarterly_financials_yfinance(stock_code)
+                
         conn = get_connection()
         df_stock_q = pd.read_sql('''
             SELECT year, quarter, revenue, gross_profit, net_profit, eps, gross_margin, net_margin 
@@ -886,10 +901,10 @@ elif choice == "🔍 同業營收篩選":
                 st.markdown("### 🤖 Gemini 同業異軍突起個股深度解析")
                 
                 # 檢查快取
-                cached_report = get_gemini_report('monthly_industry', f"{selected_month}_{selected_industry}")
+                cached_report, report_time = get_gemini_report_details('monthly_industry', f"{selected_month}_{selected_industry}")
                 report_placeholder = st.empty()
                 if cached_report:
-                    st.success("已載入快取的 AI 分析報告")
+                    st.success(f"已載入快取的 AI 分析報告 (更新時間: {report_time})")
                     report_placeholder.markdown(cached_report)
                     st.write("---")
                     if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_industry_{selected_month}_{selected_industry}"):
@@ -1127,10 +1142,10 @@ elif choice == "📈 季報三率分析":
                 st.markdown("### 🤖 Gemini 季度財報總體獲利大解析")
                 
                 # 檢查快取
-                cached_report = get_gemini_report('quarterly_market', f"{year}_Q{quarter}")
+                cached_report, report_time = get_gemini_report_details('quarterly_market', f"{year}_Q{quarter}")
                 report_placeholder = st.empty()
                 if cached_report:
-                    st.success("已載入快取的 AI 季報分析報告")
+                    st.success(f"已載入快取的 AI 季報分析報告 (更新時間: {report_time})")
                     report_placeholder.markdown(cached_report)
                     st.write("---")
                     if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_quarterly_{year}_Q{quarter}"):
@@ -1180,10 +1195,10 @@ elif choice == "🔮 潛力轉盈股分析":
     current_month = datetime.now().strftime("%Y-%m")
     
     # 檢查快取
-    cached_turnaround_list = get_gemini_report('turnaround_list', current_month)
+    cached_turnaround_list, report_time = get_gemini_report_details('turnaround_list', current_month)
     report_placeholder = st.empty()
     if cached_turnaround_list:
-        st.success("已載入當月的 AI 潛力轉虧為盈分析報告。")
+        st.success(f"已載入當月的 AI 潛力轉虧為盈分析報告。 (更新時間: {report_time})")
         report_placeholder.markdown(cached_turnaround_list)
         st.write("---")
         if st.button("🔄 重新分析並更新 (即時更新)", key='re_run_turnaround_analysis'):
@@ -1231,10 +1246,10 @@ elif choice == "🤖 Gemini AI 投資顧問":
         
         if selected_month:
             # 檢查快取
-            cached_report = get_gemini_report('monthly_market', selected_month)
+            cached_report, report_time = get_gemini_report_details('monthly_market', selected_month)
             report_placeholder = st.empty()
             if cached_report:
-                st.success("已載入快取的 AI 月度營收策略報告")
+                st.success(f"已載入快取的 AI 月度營收策略報告 (更新時間: {report_time})")
                 report_placeholder.markdown(cached_report)
                 st.write("---")
                 if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_monthly_market_{selected_month}"):
@@ -1347,12 +1362,12 @@ elif choice == "🤖 Gemini AI 投資顧問":
         current_year = current_month[:4]
         
         # 檢查快取
-        cached_conf_report = get_gemini_report('investor_conferences', current_month)
+        cached_conf_report, report_time = get_gemini_report_details('investor_conferences', current_month)
         
         report_placeholder = st.empty()
         
         if cached_conf_report:
-            st.success(f"已載入 {current_year} 年度的 AI 法說會智慧分析報告")
+            st.success(f"已載入 {current_year} 年度的 AI 法說會智慧分析報告 (更新時間: {report_time})")
             report_placeholder.markdown(cached_conf_report)
             st.write("---")
             if st.button("🔄 重新分析並更新 (即時更新)", key='re_conf_report_button'):

@@ -170,6 +170,93 @@ def save_quarterly_financials(records, db_path=DEFAULT_DB_PATH):
     conn.commit()
     conn.close()
 
+def backfill_quarterly_financials_yfinance(stock_code, db_path=DEFAULT_DB_PATH):
+    """
+    從 yfinance 下載個股的歷史季度綜合損益表，並儲存到資料庫中。
+    以此來補全資料庫中缺失的歷史季度數據（例如 2025Q4, 2025Q3 等）。
+    """
+    import yfinance as yf
+    import pandas as pd
+    
+    ticker_code = f"{stock_code}.TW"
+    try:
+        t = yf.Ticker(ticker_code)
+        df = t.quarterly_income_stmt
+        if df.empty or len(df) == 0:
+            ticker_code = f"{stock_code}.TWO"
+            t = yf.Ticker(ticker_code)
+            df = t.quarterly_income_stmt
+    except Exception as e:
+        print(f"Error fetching yfinance ticker {stock_code}: {e}")
+        return False
+        
+    if df.empty or len(df) == 0:
+        return False
+        
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    # 撈取該股名稱
+    cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (stock_code,))
+    row_name = cursor.fetchone()
+    stock_name = row_name['stock_name'] if row_name else ""
+    
+    eps_field = 'Basic EPS'
+    if eps_field not in df.index and 'Diluted EPS' in df.index:
+        eps_field = 'Diluted EPS'
+        
+    records_saved = 0
+    
+    for col in df.columns:
+        try:
+            dt = pd.to_datetime(col)
+            year = dt.year
+            quarter = (dt.month - 1) // 3 + 1
+            
+            revenue_val = df.loc['Total Revenue', col] if 'Total Revenue' in df.index else None
+            gross_profit_val = df.loc['Gross Profit', col] if 'Gross Profit' in df.index else None
+            net_profit_val = df.loc['Net Income', col] if 'Net Income' in df.index else None
+            
+            if pd.isna(revenue_val) or revenue_val is None:
+                continue
+                
+            revenue = float(revenue_val) / 1000.0 if not pd.isna(revenue_val) else 0.0
+            gross_profit = float(gross_profit_val) / 1000.0 if not pd.isna(gross_profit_val) else 0.0
+            net_profit = float(net_profit_val) / 1000.0 if not pd.isna(net_profit_val) else 0.0
+            
+            eps = None
+            if eps_field in df.index:
+                eps_val = df.loc[eps_field, col]
+                if not pd.isna(eps_val) and eps_val is not None:
+                    eps = float(eps_val)
+                    
+            gross_margin = (gross_profit / revenue * 100) if revenue else 0.0
+            net_margin = (net_profit / revenue * 100) if revenue else 0.0
+            
+            cursor.execute('''
+                INSERT INTO quarterly_financials 
+                (year, quarter, stock_code, stock_name, revenue, gross_profit, net_profit, eps, gross_margin, net_margin)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(year, quarter, stock_code) DO UPDATE SET
+                    stock_name=excluded.stock_name,
+                    revenue=excluded.revenue,
+                    gross_profit=excluded.gross_profit,
+                    net_profit=excluded.net_profit,
+                    eps=COALESCE(excluded.eps, quarterly_financials.eps),
+                    gross_margin=excluded.gross_margin,
+                    net_margin=excluded.net_margin
+            ''', (
+                year, quarter, stock_code, stock_name, 
+                revenue, gross_profit, net_profit, eps, gross_margin, net_margin
+            ))
+            records_saved += 1
+        except Exception as e:
+            print(f"Error parsing quarter {col} for {stock_code}: {e}")
+            
+    conn.commit()
+    conn.close()
+    return records_saved > 0
+
 def save_gemini_industry(stock_code, stock_name, refined_industry, reason, db_path=DEFAULT_DB_PATH):
     """儲存/更新單筆 Gemini 精細化產業分類"""
     conn = get_connection(db_path)
@@ -341,6 +428,18 @@ def get_gemini_report(report_type, report_key, db_path=DEFAULT_DB_PATH):
     res = cursor.fetchone()
     conn.close()
     return res['report_content'] if res else None
+
+def get_gemini_report_details(report_type, report_key, db_path=DEFAULT_DB_PATH):
+    """獲取快取的 AI 分析報告及更新時間"""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT report_content, updated_at FROM gemini_reports 
+        WHERE report_type = ? AND report_key = ?
+    ''', (report_type, report_key))
+    res = cursor.fetchone()
+    conn.close()
+    return (res['report_content'], res['updated_at']) if res else (None, None)
 
 def get_db_stats(db_path=DEFAULT_DB_PATH):
     """獲取資料庫各資料表筆數統計"""
