@@ -909,6 +909,77 @@ def check_ma_convergence(stock_code):
         print(f"Error checking MA convergence for {stock_code}: {e}")
         return False, 999.0, {}, 0.0
 
+def check_ma_convergence_batch(stock_codes):
+    """
+    批次計算多個個股的均線糾結程度。
+    回傳: {stock_code: (success, spread, ma_dict, price)}
+    """
+    import yfinance as yf
+    import pandas as pd
+    res = {}
+    if not stock_codes:
+        return res
+    tickers = []
+    for c in stock_codes:
+        tickers.append(f"{c}.TW")
+        tickers.append(f"{c}.TWO")
+    try:
+        df = yf.download(tickers, period="90d", progress=False)
+        if df.empty:
+            return res
+        if isinstance(df.columns, pd.MultiIndex):
+            if 'Close' in df.columns.levels[0]:
+                close_df = df['Close']
+            elif 'Close' in df.columns.levels[1]:
+                close_df = df.xs('Close', axis=1, level=1)
+            else:
+                close_df = pd.DataFrame()
+        else:
+            close_df = df[['Close']] if 'Close' in df.columns else pd.DataFrame()
+            
+        for code in stock_codes:
+            success = False
+            spread = 999.0
+            ma_dict = {}
+            current_price = 0.0
+            
+            for t_suffix in [".TW", ".TWO"]:
+                ticker = f"{code}{t_suffix}"
+                if ticker in close_df.columns:
+                    series = close_df[ticker].dropna()
+                    if len(series) >= 60:
+                        try:
+                            ma5 = float(series.rolling(5).mean().iloc[-1])
+                            ma10 = float(series.rolling(10).mean().iloc[-1])
+                            ma20 = float(series.rolling(20).mean().iloc[-1])
+                            ma60 = float(series.rolling(60).mean().iloc[-1])
+                            price = float(series.iloc[-1])
+                            
+                            mas = [ma5, ma10, ma20, ma60]
+                            max_ma = max(mas)
+                            min_ma = min(mas)
+                            spread_val = ((max_ma - min_ma) / price) * 100
+                            
+                            ma_dict = {
+                                '5MA': round(ma5, 2),
+                                '10MA': round(ma10, 2),
+                                '20MA': round(ma20, 2),
+                                '60MA': round(ma60, 2)
+                            }
+                            current_price = round(price, 2)
+                            spread = round(spread_val, 2)
+                            success = True
+                            break
+                        except Exception as e:
+                            print(f"Error calculating MA for {code}: {e}")
+            res[code] = (success, spread, ma_dict, current_price)
+    except Exception as e:
+        print(f"Error checking batch MA convergence: {e}")
+        # fallback to individual calculations
+        for code in stock_codes:
+            res[code] = check_ma_convergence(code)
+    return res
+
 def analyze_chip_and_ma_convergence(api_key, db_path=None):
     """
     使用 Gemini (啟用 Google Search Grounding) 聯網搜尋近期有「特定分點買超/收購、籌碼集中度上升」的台股標的。

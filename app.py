@@ -1243,24 +1243,28 @@ elif choice == "🎯 籌碼與技術糾結股":
     
     api_key = st.session_state.get('api_key_input')
     
-    def render_verification_table(report_text):
-        from gemini_service import extract_valid_stock_codes, check_ma_convergence
+    @st.cache_data(ttl=1800)
+    def get_ma_convergence_table_data(report_text):
+        from gemini_service import extract_valid_stock_codes, check_ma_convergence_batch
         valid_codes = extract_valid_stock_codes(report_text)
-        if valid_codes:
-            st.markdown("### 📊 均線糾結度量化驗證表 (實時數據)")
-            st.caption("計算公式: Spread = (Max(5MA, 10MA, 20MA, 60MA) - Min(5MA, 10MA, 20MA, 60MA)) / 目前股價 * 100。數值越低代表均線越糾結整理。")
+        if not valid_codes:
+            return []
             
-            rows = []
-            for code in valid_codes:
-                # 獲取股票名稱
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (code,))
-                r = cursor.fetchone()
-                conn.close()
-                name = r['stock_name'] if r else "未知"
-                
-                success, spread, mas, price = check_ma_convergence(code)
+        batch_results = check_ma_convergence_batch(valid_codes)
+        
+        rows = []
+        for code in valid_codes:
+            # 獲取股票名稱
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (code,))
+            r = cursor.fetchone()
+            conn.close()
+            name = r['stock_name'] if r else "未知"
+            
+            res_val = batch_results.get(code)
+            if res_val:
+                success, spread, mas, price = res_val
                 if success:
                     # 決定燈號
                     if spread < 3.0:
@@ -1281,13 +1285,17 @@ elif choice == "🎯 籌碼與技術糾結股":
                         "均線價差比 (Spread)": f"{spread}%",
                         "狀態": status
                     })
-            if rows:
-                df_verify = pd.DataFrame(rows)
-                st.dataframe(df_verify, use_container_width=True)
-            else:
-                st.info("無法獲取任何候選股的均線數據。")
+        return rows
+
+    def render_verification_table(report_text):
+        rows = get_ma_convergence_table_data(report_text)
+        if rows:
+            st.markdown("### 📊 均線糾結度量化驗證表 (實時數據)")
+            st.caption("計算公式: Spread = (Max(5MA, 10MA, 20MA, 60MA) - Min(5MA, 10MA, 20MA, 60MA)) / 目前股價 * 100。數值越低代表均線越糾結整理。")
+            df_verify = pd.DataFrame(rows)
+            st.dataframe(df_verify, use_container_width=True)
         else:
-            st.info("報告中未提及任何已知的台股代碼，無法進行均線糾結度驗證。")
+            st.info("報告中未提及任何已知的台股代碼，或暫時無法獲取均線數據。")
 
     if cached_chip_report:
         st.success(f"已載入當月的籌碼與技術分析報告。 (更新時間: {report_time})")
