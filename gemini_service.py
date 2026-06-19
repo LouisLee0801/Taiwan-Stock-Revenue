@@ -547,6 +547,8 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
         report_content = response.text
         if not report_content or not report_content.strip():
             raise ValueError("API returned empty content")
+        if len(report_content.strip()) < 300 or "系統提示" in report_content:
+            raise ValueError(f"API returned incomplete status: {report_content[:150]}")
         write_gemini_debug("Response text successfully retrieved.")
         return report_content
     except Exception as e:
@@ -825,6 +827,8 @@ def analyze_turnaround_stocks(api_key, db_path=None):
         report_content = response.text
         if not report_content or not report_content.strip():
             raise ValueError("API returned empty content")
+        if len(report_content.strip()) < 300 or "系統提示" in report_content:
+            raise ValueError(f"API returned incomplete status: {report_content[:150]}")
         # 快取報告
         save_gemini_report('turnaround_list', current_date_str[:7], report_content, db_path=db_path)
         return report_content
@@ -936,6 +940,8 @@ def analyze_chip_and_ma_convergence(api_key, db_path=None):
         report_content = response.text
         if not report_content or not report_content.strip():
             raise ValueError("API returned empty content")
+        if len(report_content.strip()) < 300 or "系統提示" in report_content:
+            raise ValueError(f"API returned incomplete status: {report_content[:150]}")
         # 快取報告
         save_gemini_report('chip_and_ma_convergence', current_date_str[:7], report_content, db_path=db_path)
         return report_content
@@ -1015,6 +1021,8 @@ def analyze_investor_conferences(api_key, db_path=None):
         report_content = response.text
         if not report_content or not report_content.strip():
             raise ValueError("API returned empty content")
+        if len(report_content.strip()) < 300 or "系統提示" in report_content:
+            raise ValueError(f"API returned incomplete status: {report_content[:150]}")
         save_gemini_report('investor_conferences', current_date_str[:7], report_content, db_path=db_path)
         return report_content
     except Exception as e:
