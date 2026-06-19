@@ -342,6 +342,7 @@ with st.sidebar:
         "🔍 同業營收篩選",
         "📈 季報三率分析",
         "🔮 潛力轉盈股分析",
+        "🎯 籌碼與技術糾結股",
         "🤖 Gemini AI 投資顧問",
         "⚙️ 資料管理中心"
     ]
@@ -1229,11 +1230,104 @@ elif choice == "🔮 潛力轉盈股分析":
                         st.markdown(report)
                         st.rerun()
 
+# --- 3.6. 頁面：籌碼與技術糾結股 ---
+elif choice == "🎯 籌碼與技術糾結股":
+    st.markdown('<h1 class="gradient-text">🎯 主力籌碼集中與均線糾結股掃描</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="gradient-subtext">由 Gemini AI 聯網分析近期「特定分點持續買超/收購、籌碼集中度上升」的個股，並結合實時均線（5MA/10MA/20MA/60MA）糾結度進行量化計算與驗證。</p>', unsafe_allow_html=True)
+    
+    current_month = datetime.now().strftime("%Y-%m")
+    
+    # 檢查快取
+    cached_chip_report, report_time = get_gemini_report_details('chip_and_ma_convergence', current_month)
+    report_placeholder = st.empty()
+    
+    api_key = st.session_state.get('api_key_input')
+    
+    def render_verification_table(report_text):
+        from gemini_service import extract_valid_stock_codes, check_ma_convergence
+        valid_codes = extract_valid_stock_codes(report_text)
+        if valid_codes:
+            st.markdown("### 📊 均線糾結度量化驗證表 (實時數據)")
+            st.caption("計算公式: Spread = (Max(5MA, 10MA, 20MA, 60MA) - Min(5MA, 10MA, 20MA, 60MA)) / 目前股價 * 100。數值越低代表均線越糾結整理。")
+            
+            rows = []
+            for code in valid_codes:
+                # 獲取股票名稱
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (code,))
+                r = cursor.fetchone()
+                conn.close()
+                name = r['stock_name'] if r else "未知"
+                
+                success, spread, mas, price = check_ma_convergence(code)
+                if success:
+                    # 決定燈號
+                    if spread < 3.0:
+                        status = "🟢 強烈糾結 (<3%)"
+                    elif spread <= 5.0:
+                        status = "🟡 輕微糾結 (3%-5%)"
+                    else:
+                        status = "⚪ 未糾結 (>5%)"
+                        
+                    rows.append({
+                        "股票代號": code,
+                        "股票名稱": name,
+                        "即時股價": f"{price} 元",
+                        "5MA": f"{mas.get('5MA')} 元",
+                        "10MA": f"{mas.get('10MA')} 元",
+                        "20MA": f"{mas.get('20MA')} 元",
+                        "60MA": f"{mas.get('60MA')} 元",
+                        "均線價差比 (Spread)": f"{spread}%",
+                        "狀態": status
+                    })
+            if rows:
+                df_verify = pd.DataFrame(rows)
+                st.dataframe(df_verify, use_container_width=True)
+            else:
+                st.info("無法獲取任何候選股的均線數據。")
+        else:
+            st.info("報告中未提及任何已知的台股代碼，無法進行均線糾結度驗證。")
+
+    if cached_chip_report:
+        st.success(f"已載入當月的籌碼與技術分析報告。 (更新時間: {report_time})")
+        report_placeholder.markdown(cached_chip_report)
+        st.write("---")
+        render_verification_table(cached_chip_report)
+        
+        st.write("---")
+        if st.button("🔄 重新分析並更新 (即時更新)", key='re_run_chip_analysis'):
+            if not api_key:
+                st.error("請先在側邊欄配置您的 Gemini API Key！")
+            else:
+                with st.spinner("Gemini 正在聯網搜尋最新分點籌碼動態，並計算均線狀態，請稍候... (這可能需要 20-30 秒)"):
+                    from gemini_service import analyze_chip_and_ma_convergence
+                    report = analyze_chip_and_ma_convergence(api_key, db_path=None)
+                    if "失敗" in report or "未設定" in report or "error" in report.lower():
+                        st.error(handle_gemini_error(report))
+                    else:
+                        report_placeholder.markdown(report)
+                        st.success("✔ 報告已成功更新！")
+                        st.rerun()
+    else:
+        st.info("尚未產生當月的籌碼與技術糾結分析報告。")
+        if st.button("🎯 執行籌碼與技術面大掃描", key='run_chip_analysis'):
+            if not api_key:
+                st.error("請先在側邊欄配置您的 Gemini API Key！")
+            else:
+                with st.spinner("Gemini 正在聯網搜尋最新分點籌碼動態，並計算均線狀態，請稍候... (這可能需要 20-30 秒)"):
+                    from gemini_service import analyze_chip_and_ma_convergence
+                    report = analyze_chip_and_ma_convergence(api_key, db_path=None)
+                    if "失敗" in report or "未設定" in report or "error" in report.lower():
+                        st.error(handle_gemini_error(report))
+                    else:
+                        report_placeholder.markdown(report)
+                        st.success("✔ 報告已成功掃描！")
+                        st.rerun()
+
 # --- 4. 頁面：Gemini AI 投資顧問 ---
 elif choice == "🤖 Gemini AI 投資顧問":
     st.markdown('<h1 class="gradient-text">🤖 Gemini AI 智慧基本面投顧</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="gradient-subtext">結合大盤、同業及個股的營收與估值數據，提供月度大盤策略報告，並支援基本面智慧問答。</p>', unsafe_allow_html=True)
-    
     # 選擇月份
     conn = get_connection()
     df_months = pd.read_sql('SELECT DISTINCT date_month FROM monthly_revenue ORDER BY date_month DESC', conn)

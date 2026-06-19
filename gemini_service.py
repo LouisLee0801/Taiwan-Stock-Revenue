@@ -646,6 +646,342 @@ def predict_turnarounds_with_gemini(api_key, industry_name, stock_financials_jso
         print(f"Error predicting turnarounds: {e}")
         return []
 
+def get_latest_stock_prices_batch(stock_codes):
+    """批次從 yfinance 取得最新股價，回傳 {stock_code: price} 字典"""
+    import yfinance as yf
+    import pandas as pd
+    res = {}
+    if not stock_codes:
+        return res
+    tickers = []
+    for c in stock_codes:
+        tickers.append(f"{c}.TW")
+        tickers.append(f"{c}.TWO")
+    try:
+        df = yf.download(tickers, period="5d", progress=False)
+        if df.empty:
+            return res
+        if isinstance(df.columns, pd.MultiIndex):
+            if 'Close' in df.columns.levels[0]:
+                close_df = df['Close']
+            elif 'Close' in df.columns.levels[1]:
+                close_df = df.xs('Close', axis=1, level=1)
+            else:
+                close_df = pd.DataFrame()
+        else:
+            close_df = df
+            
+        for code in stock_codes:
+            price = None
+            for t_suffix in [".TW", ".TWO"]:
+                ticker = f"{code}{t_suffix}"
+                if ticker in close_df.columns:
+                    col_data = close_df[ticker]
+                    for val in reversed(col_data.dropna().tolist()):
+                        price = float(val)
+                        break
+                if price is not None:
+                    break
+            if price is not None:
+                res[code] = price
+    except Exception as e:
+        print(f"Error fetching batch stock prices: {e}")
+        # fallback to individual downloads
+        for code in stock_codes:
+            res[code] = get_latest_stock_price(code)
+    return res
+
+def analyze_turnaround_stocks(api_key, db_path=None):
+    """
+    找出資料庫中最近一季虧損（EPS <= 0.2）或股價偏低，但最新月營收 YoY 成長的潛力標的，
+    結合過去 6 個月的月營收趨勢、法說會、新聞、TrendForce、經濟日報與工商時報等因素，
+    調用 Gemini (啟用 Google Search Grounding) 聯網分析判斷下一季最有可能 EPS 虧轉盈或回到 10 元票面價值的個股。
+    """
+    model_with_search = get_vertex_model(api_key, enable_search=True)
+    if not model_with_search:
+        return "Gemini API 金鑰未設定或初始化失敗，無法進行轉盈股分析。"
+        
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    # 查詢候選股 (放寬 EPS 限制，並拉取更多候選以透過即時股價過濾)
+    cursor.execute('''
+        SELECT 
+            m.stock_code, 
+            m.stock_name, 
+            m.industry AS original_industry, 
+            m.yoy AS latest_yoy, 
+            m.revenue AS latest_revenue, 
+            q.eps AS latest_eps,
+            q.year,
+            q.quarter
+        FROM (
+            SELECT stock_code, stock_name, industry, yoy, revenue,
+                   ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY date_month DESC) as rn
+            FROM monthly_revenue
+        ) m
+        JOIN (
+            SELECT stock_code, eps, year, quarter,
+                   ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY year DESC, quarter DESC) as rn
+            FROM quarterly_financials
+        ) q ON m.stock_code = q.stock_code AND q.rn = 1
+        WHERE m.rn = 1 AND (q.eps <= 0.2 OR m.stock_code IN (
+            SELECT DISTINCT stock_code FROM daily_pe WHERE pb < 1.0 OR pe <= 0 OR pe IS NULL
+        )) AND m.yoy > 5
+        ORDER BY m.yoy DESC
+        LIMIT 35
+    ''')
+    rows = cursor.fetchall()
+    
+    if not rows:
+        conn.close()
+        return "目前資料庫中沒有符合篩選條件的潛力轉盈個股。"
+        
+    # 批次查詢最新股價
+    prices_map = get_latest_stock_prices_batch([r['stock_code'] for r in rows])
+    
+    filtered_rows = []
+    for r in rows:
+        code = r['stock_code']
+        price = prices_map.get(code)
+        if price is None:
+            price = get_latest_stock_price(code)
+        
+        # 篩選條件：1. 最新一季 EPS <= 0.2 或是 2. 股價低於 15 元
+        if price is not None:
+            if r['latest_eps'] <= 0.2 or price < 15:
+                filtered_rows.append((r, price))
+                
+    filtered_rows = filtered_rows[:12]
+    
+    candidates = []
+    for r, price in filtered_rows:
+        code = r['stock_code']
+        # 查詢該股過去 6 個月營收趨勢
+        cursor.execute('''
+            SELECT date_month, revenue, yoy, mom 
+            FROM monthly_revenue 
+            WHERE stock_code = ? 
+            ORDER BY date_month DESC 
+            LIMIT 6
+        ''', (code,))
+        rev_history = cursor.fetchall()
+        
+        rev_history_str_list = []
+        for rh in rev_history:
+            rev_history_str_list.append(
+                f"    - {rh['date_month']}: 營收 {rh['revenue']/1000:.1f}百萬 (YoY: {rh['yoy']:.1f}%, MoM: {rh['mom']:.1f}%)"
+            )
+        rev_history_str = "\n".join(rev_history_str_list)
+        
+        price_str = f"目前即時股價: {price} 元"
+        candidates.append(
+            f"- {r['stock_code']} {r['stock_name']} ({price_str}):\n"
+            f"  - 最新一季報 EPS: {r['latest_eps']} 元\n"
+            f"  - 過去 6 個月月營收趨勢:\n{rev_history_str}"
+        )
+    conn.close()
+    candidates_str = "\n".join(candidates)
+    
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    prompt = f"""
+你是一位專業的台股投資顧問與基本面策略分析師。
+當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
+
+我們從資料庫與即時市價中篩選出了可能具有轉盈潛力（最新一季 EPS 處於微利或虧損狀態且營收 YoY 成長，或者股價低於票面價值 10 元）的個股名單，以及它們過去 6 個月的月營收趨勢：
+{candidates_str}
+
+請利用你的 Google 搜尋引擎聯網工具，深入查詢這幾檔個股的最新業務現況、產業動態、媒體報導與法說會內容，並撰寫一份專業的**台股潛力轉虧為盈個股深度解析報告**。
+
+特別注意：
+1. 請結合各別公司過去數月的**月營收變化趨勢**（是正在加速成長、築底向上還是波段起伏）。
+2. 指定研判與比對 **TrendForce 研報（特別是涉及半導體/面板/記憶體等產業）、法說會指引、重大新聞，以及《經濟日報》、《工商時報》的最新報導與評論**。
+3. 判斷下一季哪些股票最有可能實現 **EPS 虧轉盈**（EPS 由負轉正），以及哪些目前股價低於 10 元票面價值的股票最有可能**回到/站上 10 元票面價值**。
+
+報告內容應包括：
+1. **整體轉盈趨勢與宏觀評估**：簡述營收領先獲利反映的商業邏輯，並說明這批公司目前所處的產業轉折點（如產業循環谷底復甦、新興應用放量）。
+2. **轉盈與回到票面價值潛力評估表**：請以 Markdown 表格列出所有分析的個股，欄位包含：
+   - 股票代號與名稱
+   - 目前股價
+   - 最新一季 EPS
+   - 預估下一季是否能 EPS 虧轉盈 (預估 EPS)
+   - 預估是否能回到/站上票面價值 10 元 (是/否/已高於 10 元)
+   - 潛力評級 (高/中/低)
+   - 主要評估依據 (TrendForce、法說會、經濟日報/工商時報等資訊摘要)
+3. **個股逐一深度剖析**：針對表格中潛力評級為「高」或「中」的 4-6 檔核心個股進行深入檢索：
+   - 說明其核心業務與近期營收暴增/股價穩定的具體原因（如：新產品認證通過、取得特定大廠訂單、缺料緩解、產品結構優化等）。
+   - 分析其最近一次公開法說會的重點與管理層對轉盈與股價重回票面的時程展望。
+   - **法說會時間**：請明確寫出最近一次法說會發生的具體時間（年月或日期）。
+   - **估值點評**：利用搜尋檢索其當前的預估本益比 (Forward PE)、PB 淨值比，評估目前股價是否已過度反映轉盈預期。
+4. **風險提示**：列出投資這類轉盈股的常見陷阱（如：營收認列不具持續性、一次性處分利益、本業仍疲弱等）。
+5. **操作策略與結論**：如何透過分批佈局或確認季報利潤率轉正來進行安全操作。
+
+請以繁體中文撰寫，內容要具備高度專業度，使用 Markdown 格式呈現，多使用標題與加粗字體。
+注意：請以當前時間視角來分析，避免提及陳舊分析，專注於當前的實際狀況。
+"""
+    try:
+        response = model_with_search.generate_content(prompt)
+        report_content = response.text
+        if not report_content or not report_content.strip():
+            raise ValueError("API returned empty content")
+        # 快取報告
+        save_gemini_report('turnaround_list', current_date_str[:7], report_content, db_path=db_path)
+        return report_content
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Search grounding failed for turnaround stocks: {error_msg}. Falling back...")
+        try:
+            model_no_search = get_vertex_model(api_key, enable_search=False)
+            if not model_no_search:
+                return f"Gemini 產生轉盈股分析報告失敗: {e}"
+            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據上述提供的本地資料庫數據（EPS、月營收 YoY 等）與您對這些公司的認知進行基本面深度分析。"
+            response_fallback = model_no_search.generate_content(fallback_prompt)
+            fallback_content = response_fallback.text
+            if fallback_content and fallback_content.strip():
+                save_gemini_report('turnaround_list', current_date_str[:7], fallback_content, db_path=db_path)
+                notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據與即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
+                return notice + fallback_content
+            else:
+                return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析亦無回應。"
+        except Exception as fallback_err:
+            return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
+
+def check_ma_convergence(stock_code):
+    """
+    計算特定個股的均線糾結程度。
+    回傳: (success: bool, spread: float, ma_dict: dict, current_price: float)
+    """
+    import yfinance as yf
+    import pandas as pd
+    try:
+        # 下載過去 90 天以確保能計算出 60MA
+        ticker = f"{stock_code}.TW"
+        df = yf.download(ticker, period="90d", progress=False)
+        if df.empty or len(df) == 0:
+            ticker = f"{stock_code}.TWO"
+            df = yf.download(ticker, period="90d", progress=False)
+            
+        if df.empty or len(df) < 60:
+            return False, 999.0, {}, 0.0
+            
+        df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
+        close_series = df['Close']
+        
+        # 計算均線，並轉成一般 float 避免 serialization 錯誤
+        ma5 = float(close_series.rolling(5).mean().iloc[-1])
+        ma10 = float(close_series.rolling(10).mean().iloc[-1])
+        ma20 = float(close_series.rolling(20).mean().iloc[-1])
+        ma60 = float(close_series.rolling(60).mean().iloc[-1])
+        
+        current_price = float(close_series.iloc[-1])
+        
+        if pd.isna(ma5) or pd.isna(ma10) or pd.isna(ma20) or pd.isna(ma60) or pd.isna(current_price):
+            return False, 999.0, {}, 0.0
+            
+        # 計算糾結度 (百分比價差比)
+        mas = [ma5, ma10, ma20, ma60]
+        max_ma = max(mas)
+        min_ma = min(mas)
+        spread = ((max_ma - min_ma) / current_price) * 100
+        
+        ma_dict = {
+            '5MA': round(ma5, 2),
+            '10MA': round(ma10, 2),
+            '20MA': round(ma20, 2),
+            '60MA': round(ma60, 2)
+        }
+        return True, round(spread, 2), ma_dict, round(current_price, 2)
+    except Exception as e:
+        print(f"Error checking MA convergence for {stock_code}: {e}")
+        return False, 999.0, {}, 0.0
+
+def analyze_chip_and_ma_convergence(api_key, db_path=None):
+    """
+    使用 Gemini (啟用 Google Search Grounding) 聯網搜尋近期有「特定分點買超/收購、籌碼集中度上升」的台股標的。
+    回傳一個包含分析報告與候選股代碼的結果。
+    """
+    model_with_search = get_vertex_model(api_key, enable_search=True)
+    if not model_with_search:
+        return "Gemini API 金鑰未設定或初始化失敗，無法進行籌碼分析。"
+
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+
+    prompt = f"""
+你是一位專業的台股籌碼面與技術面分析專家。
+當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
+
+請利用你的 Google 搜尋引擎聯網工具，檢索最近一個月內台灣股市中，具有以下特徵的個股名單與討論：
+1. **特定分點持續收購**：有特定的證券商分點（如：美商高盛、凱基台北、富邦建國、元大證券某分點、或特定的關鍵主力/隔日沖/波段主力分點）在過去一段時間（例如過去 1-4 週）不斷買進、囤貨該股票。
+2. **籌碼集中度上升**：主力買超集中，前十大分點買超比率拉高，股權由散戶流向主力/大戶，籌碼日趨集中。
+3. **技術面均線糾結**：股價歷經一段時間整理，短期、中期與長期均線（5MA、10MA、20MA、60MA）開始在中低檔糾結，波動幅度變小，量縮整理，顯示一切開始穩定。
+
+請指定檢索各家財經論壇（如 PTT 股版、股市爆料同學會、Mobile01）、專業籌碼網站（籌碼K線、玩股網、理財寶、財報狗）以及財經新聞媒體。
+
+請為我撰寫一份**【台股籌碼集中與均線糾結股】深度解析報告**，包含：
+1. **籌碼面大局觀**：說明主力分點囤貨與籌碼集中度上升對股價後市的意義（如：底部打底完成、即將發動行情）。
+2. **籌碼囤貨指標股分析**：請列出至少 6-8 檔近期被市場討論或數據證實「特定分點買超、籌碼集中、股價趨於穩定」的具體股票。針對每檔股票，必須說明：
+   - 股票代號（4位數字）與名稱。
+   - 買超該股的**特定分點名稱**（例如：台灣摩根士丹利、元大松山、凱基台北等）。
+   - 主力收購的動機或近期利多題材（如新接單、併購、大戶鎖碼）。
+   - 技術面整理狀況（均線是否已糾結、成交量是否萎縮）。
+3. **操作建議與風險提示**：如何利用主力成本線佈局，以及防範主力假突破或出貨風險。
+
+請在報告中明確使用 `[股票代號]`（例如 `[2330]` 或 `[2061]`，加上方括號）標記每檔被提及的股票，以便系統解析。
+請以繁體中文撰寫，內容要專業、客觀，並使用 Markdown 格式。
+注意：請以當前時間視角來分析，避免提及陳舊分析，專注於當前的實際狀況。
+"""
+    try:
+        response = model_with_search.generate_content(prompt)
+        report_content = response.text
+        if not report_content or not report_content.strip():
+            raise ValueError("API returned empty content")
+        # 快取報告
+        save_gemini_report('chip_and_ma_convergence', current_date_str[:7], report_content, db_path=db_path)
+        return report_content
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Search grounding failed for chip analysis: {error_msg}. Falling back...")
+        try:
+            model_no_search = get_vertex_model(api_key, enable_search=False)
+            if not model_no_search:
+                return f"Gemini 產生籌碼分析報告失敗: {e}"
+                
+            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請根據您對近期台股（如最近幾季）籌碼集中、主力分點囤貨的認知，並結合均線糾結的技術特徵，為我撰寫這份報告。"
+            response_fallback = model_no_search.generate_content(fallback_prompt)
+            fallback_content = response_fallback.text
+            if fallback_content and fallback_content.strip():
+                save_gemini_report('chip_and_ma_convergence', current_date_str[:7], fallback_content, db_path=db_path)
+                notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「備用 AI 模型知識庫」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
+                return notice + fallback_content
+            else:
+                return f"Gemini 產生籌碼分析報告失敗: {e}，且備用本地分析亦無回應。"
+        except Exception as fallback_err:
+            return f"Gemini 產生籌碼分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
+
+def extract_valid_stock_codes(text, db_path=None):
+    """
+    從分析報告文字中利用正則表達式尋找 [股票代號] 或四位數字，並比對資料庫是否為有效個股。
+    """
+    import re
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT stock_code FROM monthly_revenue")
+    valid_codes = {row['stock_code'] for row in cursor.fetchall()}
+    conn.close()
+    
+    # 尋找所有 4 位數字
+    candidates = re.findall(r'\b\d{4}\b', text)
+    # 尋找所有帶方括號的 [2330] 格式
+    candidates_bracket = re.findall(r'\[(\d{4})\]', text)
+    
+    all_found = set(candidates + candidates_bracket)
+    
+    # 過濾出在資料庫中真正存在的個股代碼 (避開年份如 2024, 2025, 2026 等)
+    valid_found = [code for code in all_found if code in valid_codes]
+    return sorted(list(valid_found))
+
+
 def analyze_investor_conferences(api_key, db_path=None):
     """
     使用 Gemini (啟用 Google Search Grounding) 聯網查詢並整理所有上市上櫃公司當年度的法說內容。
@@ -717,106 +1053,3 @@ def analyze_investor_conferences(api_key, db_path=None):
         except Exception as fallback_err:
             return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
 
-def analyze_turnaround_stocks(api_key, db_path=None):
-    """
-    找出資料庫中最近一季虧損（EPS <= 0.1），但最新月營收 YoY 顯著成長的潛力標的，
-    調用 Gemini (啟用 Google Search Grounding) 聯網分析並撰寫「潛力轉盈股大解析報告」，
-    告訴用戶為什麼這些個股有機會轉虧為盈。
-    """
-    model_with_search = get_vertex_model(api_key, enable_search=True)
-    if not model_with_search:
-        return "Gemini API 金鑰未設定或初始化失敗，無法進行轉盈股分析。"
-        
-    conn = get_connection(db_path)
-    cursor = conn.cursor()
-    
-    # 查詢候選股
-    cursor.execute('''
-        SELECT 
-            m.stock_code, 
-            m.stock_name, 
-            m.industry AS original_industry, 
-            m.yoy AS latest_yoy, 
-            m.revenue AS latest_revenue, 
-            q.eps AS latest_eps,
-            q.year,
-            q.quarter
-        FROM (
-            SELECT stock_code, stock_name, industry, yoy, revenue,
-                   ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY date_month DESC) as rn
-            FROM monthly_revenue
-        ) m
-        JOIN (
-            SELECT stock_code, eps, year, quarter,
-                   ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY year DESC, quarter DESC) as rn
-            FROM quarterly_financials
-        ) q ON m.stock_code = q.stock_code AND q.rn = 1
-        WHERE m.rn = 1 AND q.eps <= 0.1 AND m.yoy > 15
-        ORDER BY m.yoy DESC
-        LIMIT 10
-    ''')
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        return "目前資料庫中沒有符合「最近一季虧損且最新月份營收 YoY 成長」的潛力轉盈個股。"
-        
-    candidates = []
-    for r in rows:
-        price = get_latest_stock_price(r['stock_code'])
-        price_str = f"目前即時股價: {price} 元" if price else "目前即時股價: 暫無"
-        candidates.append(
-            f"- {r['stock_code']} {r['stock_name']} ({price_str}): 最新季報 EPS: {r['latest_eps']} 元, 最新月營收 YoY: {r['latest_yoy']:.1f}%"
-        )
-    candidates_str = "\n".join(candidates)
-    
-    current_date_str = datetime.now().strftime("%Y-%m-%d")
-    
-    prompt = f"""
-你是一位專業的台股投資顧問與基本面策略分析師。
-當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
-
-我們從資料庫中篩選出了最新一季仍處於微利或虧損狀態（EPS <= 0.1），但最新月度營收 YoY 呈顯著爆發成長的「潛力轉虧為盈個股」名單：
-{candidates_str}
-
-請利用你的 Google 搜尋引擎聯網工具，深入查詢這幾檔個股的最新業務現況、訂單能見度、以及營收暴增原因，並撰寫一份專業的**台股潛力轉虧為盈個股深度解析報告**。
-
-報告內容應包括：
-1. **整體轉盈趨勢評估**：簡述營收領先獲利反映的商業邏輯，並說明這批公司目前所處的產業轉折點。
-2. **個股逐一深度剖析**：針對上述個股，挑選其中最具代表性與實質基本面支撐的 5-6 檔進行深入檢索：
-   - 說明其核心業務與近期營收暴增的具體原因（如：新產品認證通過、取得特定大廠訂單、缺料緩解、產品結構優化等）。
-   - 分析其最近一次公開法說會的重點與管理層對轉盈時程的展望。
-   - **法說會時間**：請明確寫出最近一次法說會發生的具體時間（年月或日期）。
-   - **估值點評**：利用搜尋檢索其當前的預估本益比 (Forward PE)、PB 淨值比，評估目前股價是否已過度反映轉盈預期。
-3. **風險提示**：列出投資這類轉盈股的常見陷阱（如：營收認列不具持續性、一次性處分利益、本業仍疲弱等）。
-4. **操作策略與結論**：如何透過分批佈局或確認季報利潤率轉正來進行安全操作。
-
-請以繁體中文撰寫，內容要具備高度專業度，使用 Markdown 格式呈現，多使用標題與加粗字體。
-注意：請以當前時間視角來分析，避免提及陳舊分析，專注於當前的實際狀況。
-"""
-    try:
-        response = model_with_search.generate_content(prompt)
-        report_content = response.text
-        if not report_content or not report_content.strip():
-            raise ValueError("API returned empty content")
-        # 快取報告
-        save_gemini_report('turnaround_list', current_date_str[:7], report_content, db_path=db_path)
-        return report_content
-    except Exception as e:
-        error_msg = str(e)
-        print(f"Search grounding failed for turnaround stocks: {error_msg}. Falling back...")
-        try:
-            model_no_search = get_vertex_model(api_key, enable_search=False)
-            if not model_no_search:
-                return f"Gemini 產生轉盈股分析報告失敗: {e}"
-            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據上述提供的本地資料庫數據（EPS、月營收 YoY 等）與您對這些公司的認知進行基本面深度分析。"
-            response_fallback = model_no_search.generate_content(fallback_prompt)
-            fallback_content = response_fallback.text
-            if fallback_content and fallback_content.strip():
-                save_gemini_report('turnaround_list', current_date_str[:7], fallback_content, db_path=db_path)
-                notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據與即時市價」進行分析。若您的金鑰是付費版，請確認您的 Google Cloud 專案已開啟 Google Search Grounding API 並重新分析。**\n\n"
-                return notice + fallback_content
-            else:
-                return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析亦無回應。"
-        except Exception as fallback_err:
-            return f"Gemini 產生轉盈股分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
