@@ -31,10 +31,7 @@ def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=
     key_preview = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "invalid_key"
     write_gemini_debug(f"Configuring Gemini Client. Key: {key_preview}, Target model: {model_name}, Search: {enable_search}")
     try:
-        from google.api_core.client_options import ClientOptions
-        client_options = ClientOptions(api_endpoint="https://generativelanguage.googleapis.com/v1beta")
-        genai.configure(api_key=api_key, client_options=client_options)
-        
+        genai.configure(api_key=api_key)
         # 進行動態模型選取
         selected_model_name = model_name
         try:
