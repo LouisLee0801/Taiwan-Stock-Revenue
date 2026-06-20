@@ -87,6 +87,64 @@ def draw_k_line_chart(stock_code):
     fig.update_yaxes(showgrid=True, gridcolor='#F1F5F9')
     return fig
 
+@st.cache_data(ttl=1800)
+def get_ma_convergence_table_data(report_text):
+    from gemini_service import extract_valid_stock_codes, check_ma_convergence_batch
+    valid_codes = extract_valid_stock_codes(report_text)
+    if not valid_codes:
+        return []
+        
+    batch_results = check_ma_convergence_batch(valid_codes)
+    
+    rows = []
+    for code in valid_codes:
+        # 獲取股票名稱
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (code,))
+        r = cursor.fetchone()
+        conn.close()
+        name = r['stock_name'] if r else "未知"
+        
+        res_val = batch_results.get(code)
+        if res_val:
+            success, spread, mas, price, is_20ma_rising = res_val
+            if success:
+                # 決定燈號
+                if spread < 3.0:
+                    status = "🟢 強烈糾結 (<3%)"
+                elif spread <= 5.0:
+                    status = "🟡 輕微糾結 (3%-5%)"
+                else:
+                    status = "⚪ 未糾結 (>5%)"
+                    
+                trend_str = "📈 向上" if is_20ma_rising else "📉 向下或持平"
+                
+                rows.append({
+                    "股票代號": code,
+                    "股票名稱": name,
+                    "即時股價": f"{price} 元",
+                    "5MA": f"{mas.get('5MA')} 元",
+                    "10MA": f"{mas.get('10MA')} 元",
+                    "20MA": f"{mas.get('20MA')} 元",
+                    "60MA": f"{mas.get('60MA')} 元",
+                    "均線價差比 (Spread)": f"{spread}%",
+                    "狀態": status,
+                    "20MA 趨勢": trend_str
+                })
+    return rows
+
+def render_verification_table(report_text, title="📊 均線糾結度量化驗證表 (實時數據)"):
+    rows = get_ma_convergence_table_data(report_text)
+    if rows:
+        st.markdown(f"### {title}")
+        st.caption("計算公式: Spread = (Max(5MA, 10MA, 20MA, 60MA) - Min(5MA, 10MA, 20MA, 60MA)) / 目前股價 * 100。數值越低代表均線越糾結整理。20MA 趨勢判定今日與5天前均線斜率。")
+        df_verify = pd.DataFrame(rows)
+        # 用來點擊可選取個股看 K 線
+        st.dataframe(df_verify, use_container_width=True)
+    else:
+        st.info("報告中未提及任何已知的台股代碼，或暫時無法獲取均線數據。")
+
 def clear_active_dialog_stock():
     st.session_state.active_dialog_stock = None
     if 'df_key_suffix' not in st.session_state:
@@ -343,6 +401,7 @@ with st.sidebar:
         "📈 季報三率分析",
         "🔮 潛力轉盈股分析",
         "🎯 籌碼與技術糾結股",
+        "🚀 當月異軍突起股",
         "🤖 Gemini AI 投資顧問",
         "⚙️ 資料管理中心"
     ]
@@ -1202,6 +1261,8 @@ elif choice == "🔮 潛力轉盈股分析":
         st.success(f"已載入當月的 AI 潛力轉虧為盈分析報告。 (更新時間: {report_time})")
         report_placeholder.markdown(cached_turnaround_list)
         st.write("---")
+        render_verification_table(cached_turnaround_list, title="📊 轉盈候選股均線與 20MA 趨勢量化驗證表")
+        st.write("---")
         if st.button("🔄 重新分析並更新 (即時更新)", key='re_run_turnaround_analysis'):
             api_key = st.session_state.get('api_key_input')
             if not api_key:
@@ -1243,59 +1304,7 @@ elif choice == "🎯 籌碼與技術糾結股":
     
     api_key = st.session_state.get('api_key_input')
     
-    @st.cache_data(ttl=1800)
-    def get_ma_convergence_table_data(report_text):
-        from gemini_service import extract_valid_stock_codes, check_ma_convergence_batch
-        valid_codes = extract_valid_stock_codes(report_text)
-        if not valid_codes:
-            return []
-            
-        batch_results = check_ma_convergence_batch(valid_codes)
-        
-        rows = []
-        for code in valid_codes:
-            # 獲取股票名稱
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (code,))
-            r = cursor.fetchone()
-            conn.close()
-            name = r['stock_name'] if r else "未知"
-            
-            res_val = batch_results.get(code)
-            if res_val:
-                success, spread, mas, price = res_val
-                if success:
-                    # 決定燈號
-                    if spread < 3.0:
-                        status = "🟢 強烈糾結 (<3%)"
-                    elif spread <= 5.0:
-                        status = "🟡 輕微糾結 (3%-5%)"
-                    else:
-                        status = "⚪ 未糾結 (>5%)"
-                        
-                    rows.append({
-                        "股票代號": code,
-                        "股票名稱": name,
-                        "即時股價": f"{price} 元",
-                        "5MA": f"{mas.get('5MA')} 元",
-                        "10MA": f"{mas.get('10MA')} 元",
-                        "20MA": f"{mas.get('20MA')} 元",
-                        "60MA": f"{mas.get('60MA')} 元",
-                        "均線價差比 (Spread)": f"{spread}%",
-                        "狀態": status
-                    })
-        return rows
 
-    def render_verification_table(report_text):
-        rows = get_ma_convergence_table_data(report_text)
-        if rows:
-            st.markdown("### 📊 均線糾結度量化驗證表 (實時數據)")
-            st.caption("計算公式: Spread = (Max(5MA, 10MA, 20MA, 60MA) - Min(5MA, 10MA, 20MA, 60MA)) / 目前股價 * 100。數值越低代表均線越糾結整理。")
-            df_verify = pd.DataFrame(rows)
-            st.dataframe(df_verify, use_container_width=True)
-        else:
-            st.info("報告中未提及任何已知的台股代碼，或暫時無法獲取均線數據。")
 
     if cached_chip_report:
         st.success(f"已載入當月的籌碼與技術分析報告。 (更新時間: {report_time})")
@@ -1332,6 +1341,102 @@ elif choice == "🎯 籌碼與技術糾結股":
                         report_placeholder.markdown(report)
                         st.success("✔ 報告已成功掃描！")
                         st.rerun()
+
+
+# --- 3.7. 頁面：當月異軍突起股 ---
+elif choice == "🚀 當月異軍突起股":
+    st.markdown('<h1 class="gradient-text">🚀 當月營收異軍突起股</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="gradient-subtext">篩選當月營收 YoY 巨大爆發、高成長且具備一定規模的標的，並透過 Gemini 聯網解析其營收翻倍的具體核心驅動原因。</p>', unsafe_allow_html=True)
+    
+    current_month = get_latest_month()
+    st.markdown(f"##### 📅 目前分析期數: **{current_month}** 月營收數據")
+    
+    # 設置篩選過濾器
+    st.markdown("### 🛠️ 篩選與過濾條件設定")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        exclude_special = st.checkbox("排除建材營造與金融業 (營收波動多為一次性入帳)", value=True)
+    with col2:
+        min_yoy = st.slider("最低營收年增率 (YoY %)", min_value=10, max_value=200, value=25)
+    with col3:
+        min_rev = st.number_input("最低營收規模 (百萬元 TWD)", min_value=1, max_value=50000, value=20)
+        
+    conn = get_connection()
+    sql = '''
+        SELECT stock_code, stock_name, industry, revenue, last_year_revenue, last_month_revenue, yoy, mom 
+        FROM monthly_revenue 
+        WHERE date_month = (SELECT MAX(date_month) FROM monthly_revenue)
+          AND yoy >= ? AND revenue >= ?
+    '''
+    params = [min_yoy, min_rev * 1000]
+    if exclude_special:
+        sql += " AND industry NOT IN ('建材營造', '金融業', '金融保險業', '證券業')"
+    sql += " ORDER BY yoy DESC"
+    
+    df_surging = pd.read_sql(sql, conn, params=params)
+    conn.close()
+    
+    if df_surging.empty:
+        st.info("目前條件下無符合的異軍突起股，請放寬篩選標準。")
+    else:
+        st.markdown(f"### 📊 當月高成長個股清單 (共 {len(df_surging)} 檔)")
+        # 複製一份做格式化顯示
+        df_display = df_surging.copy()
+        df_display['revenue'] = df_display['revenue'] / 1000.0  # 轉為百萬
+        df_display = df_display.rename(columns={
+            'stock_code': '股票代號',
+            'stock_name': '股票名稱',
+            'industry': '產業別',
+            'revenue': '當月營收 (百萬元)',
+            'yoy': '營收年增率 (YoY %)',
+            'mom': '營收月增率 (MoM %)'
+        })
+        # 格式化顯示
+        st.dataframe(
+            df_display[['股票代號', '股票名稱', '產業別', '當月營收 (百萬元)', '營收年增率 (YoY %)', '營收月增率 (MoM %)']],
+            use_container_width=True
+        )
+        
+        st.write("---")
+        st.markdown("### 🔮 Gemini AI 聯網異軍突起原因解析")
+        
+        cached_analysis, report_time = get_gemini_report_details('surging_stocks_analysis', current_month[:7])
+        report_placeholder = st.empty()
+        api_key = st.session_state.get('api_key_input')
+        
+        if cached_analysis:
+            st.success(f"已載入當月的 AI 異軍突起分析報告。 (更新時間: {report_time})")
+            report_placeholder.markdown(cached_analysis)
+            st.write("---")
+            render_verification_table(cached_analysis, title="📊 異軍突起股實時均線與 20MA 趨勢量化驗證表")
+            st.write("---")
+            if st.button("🔄 重新分析並更新 (即時更新)", key='re_run_surging_analysis'):
+                if not api_key:
+                    st.error("請先在側邊欄配置您的 Gemini API Key！")
+                else:
+                    with st.spinner("Gemini 正在聯網查詢這些個股營收暴增原因，並進行深度解析，請稍候... (這可能需要 20-30 秒)"):
+                        from gemini_service import analyze_surging_stocks
+                        report = analyze_surging_stocks(api_key, db_path=None)
+                        if "失敗" in report or "未設定" in report or "error" in report.lower():
+                            st.error(handle_gemini_error(report))
+                        else:
+                            report_placeholder.markdown(report)
+                            st.success("✔ 報告已成功更新！")
+                            st.rerun()
+        else:
+            st.info("尚未產生當月的異軍突起分析報告。")
+            if st.button("🚀 執行高成長異軍突起股 AI 聯網大解析", key='run_surging_analysis'):
+                if not api_key:
+                    st.error("請先在側邊欄配置您的 Gemini API Key！")
+                else:
+                    with st.spinner("Gemini 正在聯網查詢這些個股營收暴增原因，並進行深度解析，請稍候... (這可能需要 20-30 秒)"):
+                        from gemini_service import analyze_surging_stocks
+                        report = analyze_surging_stocks(api_key, db_path=None)
+                        if "失敗" in report or "未設定" in report or "error" in report.lower():
+                            st.error(handle_gemini_error(report))
+                        else:
+                            st.markdown(report)
+                            st.rerun()
 
 # --- 4. 頁面：Gemini AI 投資顧問 ---
 elif choice == "🤖 Gemini AI 投資顧問":

@@ -714,30 +714,45 @@ def analyze_turnaround_stocks(api_key, db_path=None):
         conn.close()
         return "目前資料庫中沒有符合篩選條件的潛力轉盈個股。"
         
-    # 批次查詢最新股價
-    prices_map = get_latest_stock_prices_batch([r['stock_code'] for r in rows])
+    # 批次查詢均線糾結度、即時股價與 20MA 趨勢
+    tech_map = check_ma_convergence_batch([r['stock_code'] for r in rows])
     
     filtered_rows = []
     for r in rows:
         code = r['stock_code']
-        price = prices_map.get(code)
+        tech_val = tech_map.get(code)
+        
+        success = False
+        spread = 999.0
+        mas = {}
+        price = None
+        is_20ma_rising = False
+        
+        if tech_val:
+            success, spread, mas, price, is_20ma_rising = tech_val
+            
         # 為了避免在 yfinance 被鎖時造成長時間掛起，只有在已篩選的數量小於 3 且沒拿到價格時才嘗試單獨查詢
         if price is None and len(filtered_rows) < 3:
             price = get_latest_stock_price(code)
+            if price is not None:
+                ind_success, ind_spread, ind_mas, _, ind_is_20ma_rising = check_ma_convergence(code)
+                if ind_success:
+                    spread = ind_spread
+                    is_20ma_rising = ind_is_20ma_rising
         
         # 篩選條件：1. 最新一季 EPS <= 0.2 或是 2. 股價低於 15 元
         if price is not None:
             if r['latest_eps'] <= 0.2 or price < 15:
-                filtered_rows.append((r, price))
+                filtered_rows.append((r, price, spread, is_20ma_rising))
         else:
             # 如果依然沒有取得價格，只要滿足最新一季 EPS <= 0.2 依然保留
             if r['latest_eps'] <= 0.2:
-                filtered_rows.append((r, None))
+                filtered_rows.append((r, None, 999.0, False))
                 
     filtered_rows = filtered_rows[:12]
     
     candidates = []
-    for r, price in filtered_rows:
+    for r, price, spread, is_20ma_rising in filtered_rows:
         code = r['stock_code']
         # 查詢該股過去 6 個月營收趨勢
         cursor.execute('''
@@ -764,11 +779,26 @@ def analyze_turnaround_stocks(api_key, db_path=None):
             )
         rev_history_str = "\n".join(rev_history_str_list)
         
-        price_str = f"目前即時股價: {price} 元"
+        price_str = f"目前即時股價: {price} 元" if price is not None else "目前即時股價: N/A"
+        
+        tech_str = ""
+        if price is not None and spread != 999.0:
+            tech_str += f"  - 技術面現況：均線糾結度 (Spread) 為 {spread}%"
+            if spread < 3.0:
+                tech_str += " (🟢 均線強烈糾結整理中)"
+            elif spread <= 5.0:
+                tech_str += " (🟡 均線輕微收斂中)"
+            else:
+                tech_str += " (⚪ 均線尚未糾結)"
+            tech_str += f"；20MA 趨勢為 {'📈 向上 (20MA呈上升通道)' if is_20ma_rising else '📉 向下或持平'}\n"
+        else:
+            tech_str += "  - 技術面現況：暫無即時均線與股價數據\n"
+            
         candidates.append(
             f"- {r['stock_code']} {r['stock_name']} ({price_str}):\n"
             f"  - 最新一季報 EPS: {r['latest_eps']} 元\n"
-            f"  - 過去 6 個月月營收趨勢:\n{rev_history_str}"
+            f"  - 過去 6 個月月營收趨勢:\n{rev_history_str}\n"
+            f"{tech_str}"
         )
     conn.close()
     candidates_str = "\n".join(candidates)
@@ -779,36 +809,38 @@ def analyze_turnaround_stocks(api_key, db_path=None):
 你是一位專業的台股投資顧問與基本面策略分析師。
 當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
 
-我們從資料庫與即時市價中篩選出了可能具有轉盈潛力（最新一季 EPS 處於微利或虧損狀態且營收 YoY 成長，或者股價低於票面價值 10 元）的個股名單，以及它們過去 6 個月的月營收趨勢：
+我們從資料庫與即時均線數據中篩選出了可能具有轉盈潛力（最新一季 EPS 處於微利或虧損狀態且營收 YoY 成長，或者股價低於票面價值 10 元）的個股名單，以及它們過去 6 個月的月營收趨勢與技術指標現況：
 {candidates_str}
 
 請利用你的 Google 搜尋引擎聯網工具，深入查詢這幾檔個股的最新業務現況、產業動態、媒體報導與法說會內容，並撰寫一份專業的**台股潛力轉虧為盈個股深度解析報告**。
 
-特別注意：
-1. 請結合各別公司過去數月的**月營收變化趨勢**（是正在加速成長、築底向上還是波段起伏）。
-2. 指定研判與比對 **TrendForce 研報（特別是涉及半導體/面板/記憶體等產業）、法說會指引、重大新聞，以及《經濟日報》、《工商時報》的最新報導與評論**。
-3. 判斷下一季哪些股票最有可能實現 **EPS 虧轉盈**（EPS 由負轉正），以及哪些目前股價低於 10 元票面價值的股票最有可能**回到/站上 10 元票面價值**。
+⚠️ 重要特別規定（請嚴格遵守）：
+1. 請確保搜尋並輸出之「股票代號與公司名稱必須完全精確對應」，絕不可對錯或胡亂拼湊（例如：3321 是同泰，不是穎漢科技；穎漢科技是 4562；台積電是 2330）。如果發生代碼張冠李戴，後端程式將在量化比對時發生嚴重的邏輯衝突。
+2. 為了能讓程式系統自動提取代碼進行實時技術分析，請「務必」以方括號包圍 4 位數台股代碼（例如 `[2330]`、`[3321]` 等）。請「絕對不要」遮蔽、替代或隱藏股票代號（例如：不要寫成 [23XX]、[3XXX]、[XXXX] 或是 [xxxx]）。
+
+報告撰寫要求與重點：
+1. **月營收趨勢分析**：結合各別公司過去數月的**月營收變化趨勢**（是正在加速成長、築底向上還是波段起伏）。
+2. **多重來源比對**：指定研判與比對 **TrendForce 研報（特別是涉及半導體/面板/記憶體等產業）、法說會指引、重大新聞，以及《經濟日報》、《工商時報》的最新報導與評論**。
+3. **技術面結合評估**：請對比分析這些個股的**均線糾結狀態**（是否已在底部高度糾結，代表籌碼洗乾淨）與 **20MA 趨勢是否已經向上**（代表短中期趨勢正式走揚、主力開始拉抬）。說明技術面均線收斂且 20MA 向上是否能與營收回溫形成「基本面+技術面雙重起漲點」。
+4. **虧轉盈與票面價判斷**：判斷下一季哪些股票最有可能實現 **EPS 虧轉盈**（EPS 由負轉正），以及哪些目前股價低於 10 元票面價值的股票最有可能**回到/站上 10 元票面價值**。
 
 報告內容應包括：
-1. **整體轉盈趨勢與宏觀評估**：簡述營收領先獲利反映的商業邏輯，並說明這批公司目前所處的產業轉折點（如產業循環谷底復甦、新興應用放量）。
-2. **轉盈與回到票面價值潛力評估表**：請以 Markdown 表格列出所有分析的個股，欄位包含：
-   - 股票代號與名稱
+1. **整體轉盈趨勢與技術/基本雙共振評估**：簡述營收領先獲利反映的商業邏輯，並說明均線糾結與 20MA 向上如何代表籌碼面和技術面與基本面的同步共振。
+2. **轉盈與技術面評估綜合表**：請以 Markdown 表格列出所有分析的個股，欄位包含：
+   - 股票代號與名稱（必須對應正確，如 `[3321] 同泰`）
    - 目前股價
    - 最新一季 EPS
+   - 均線糾結狀態 (強烈糾結/輕微收斂/未糾結)
+   - 20MA 趨勢 (向上/向下/持平)
    - 預估下一季是否能 EPS 虧轉盈 (預估 EPS)
    - 預估是否能回到/站上票面價值 10 元 (是/否/已高於 10 元)
    - 潛力評級 (高/中/低)
-   - 主要評估依據 (TrendForce、法說會、經濟日報/工商時報等資訊摘要)
+   - 主要評估與技術依據摘要
 3. **個股逐一深度剖析**：針對表格中潛力評級為「高」或「中」的 4-6 檔核心個股進行深入檢索：
-   - 說明其核心業務與近期營收暴增/股價穩定的具體原因（如：新產品認證通過、取得特定大廠訂單、缺料緩解、產品結構優化等）。
-   - 分析其最近一次公開法說會的重點與管理層對轉盈與股價重回票面的時程展望。
-   - **法說會時間**：請明確寫出最近一次法說會發生的具體時間（年月或日期）。
+   - 說明其核心業務、營收暴增原因，並融合技術面（如均線糾結、20MA向上）的走勢點評。
+   - 分析其最近一次公開法說會的重點與管理層對轉盈與股價重回票面的時程展望，明確標示法說會時間。
    - **估值點評**：利用搜尋檢索其當前的預估本益比 (Forward PE)、PB 淨值比，評估目前股價是否已過度反映轉盈預期。
-4. **風險提示**：列出投資這類轉盈股的常見陷阱（如：營收認列不具持續性、一次性處分利益、本業仍疲弱等）。
-5. **操作策略與結論**：如何透過分批佈局或確認季報利潤率轉正來進行安全操作。
-
-請以繁體中文撰寫，內容要具備高度專業度，使用 Markdown 格式呈現，多使用標題與加粗字體。
-注意：請以當前時間視角來分析，避免提及陳舊分析，專注於當前的實際狀況。
+4. **風險提示與操作建議**：操作此類基本+技術面共振轉盈股的策略與防範陷阱。
 """
     try:
         response = model_with_search.generate_content(prompt)
@@ -855,7 +887,7 @@ def check_ma_convergence(stock_code):
             df = yf.download(ticker, period="90d", progress=False, timeout=5)
             
         if df.empty or len(df) < 60:
-            return False, 999.0, {}, 0.0
+            return False, 999.0, {}, 0.0, False
             
         df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
         close_series = df['Close']
@@ -869,7 +901,14 @@ def check_ma_convergence(stock_code):
         current_price = float(close_series.iloc[-1])
         
         if pd.isna(ma5) or pd.isna(ma10) or pd.isna(ma20) or pd.isna(ma60) or pd.isna(current_price):
-            return False, 999.0, {}, 0.0
+            return False, 999.0, {}, 0.0, False
+            
+        # 計算 20MA 是否向上 (比較今日與 5 天前的 20MA)
+        is_20ma_rising = False
+        if len(close_series) >= 25:
+            ma20_prev = float(close_series.rolling(20).mean().iloc[-5])
+            ma20_curr = float(close_series.rolling(20).mean().iloc[-1])
+            is_20ma_rising = ma20_curr > ma20_prev
             
         # 計算糾結度 (百分比價差比)
         mas = [ma5, ma10, ma20, ma60]
@@ -883,10 +922,10 @@ def check_ma_convergence(stock_code):
             '20MA': round(ma20, 2),
             '60MA': round(ma60, 2)
         }
-        return True, round(spread, 2), ma_dict, round(current_price, 2)
+        return True, round(spread, 2), ma_dict, round(current_price, 2), is_20ma_rising
     except Exception as e:
         print(f"Error checking MA convergence for {stock_code}: {e}")
-        return False, 999.0, {}, 0.0
+        return False, 999.0, {}, 0.0, False
 
 def check_ma_convergence_batch(stock_codes):
     """
@@ -921,6 +960,7 @@ def check_ma_convergence_batch(stock_codes):
             spread = 999.0
             ma_dict = {}
             current_price = 0.0
+            is_20ma_rising = False
             
             for t_suffix in [".TW", ".TWO"]:
                 ticker = f"{code}{t_suffix}"
@@ -939,6 +979,13 @@ def check_ma_convergence_batch(stock_codes):
                              min_ma = min(mas)
                              spread_val = ((max_ma - min_ma) / price) * 100
                              
+                             # 計算 20MA 是否向上 (比較今日與 5 天前的 20MA)
+                             is_20ma_rising_val = False
+                             if len(series) >= 25:
+                                 ma20_prev = float(series.rolling(20).mean().iloc[-5])
+                                 ma20_curr = float(series.rolling(20).mean().iloc[-1])
+                                 is_20ma_rising_val = ma20_curr > ma20_prev
+                             
                              ma_dict = {
                                  '5MA': round(ma5, 2),
                                  '10MA': round(ma10, 2),
@@ -947,16 +994,17 @@ def check_ma_convergence_batch(stock_codes):
                              }
                              current_price = round(price, 2)
                              spread = round(spread_val, 2)
+                             is_20ma_rising = is_20ma_rising_val
                              success = True
                              break
                          except Exception as e:
                              print(f"Error calculating MA for {code}: {e}")
-            res[code] = (success, spread, ma_dict, current_price)
+            res[code] = (success, spread, ma_dict, current_price, is_20ma_rising)
     except Exception as e:
         print(f"Error checking batch MA convergence: {e}")
         # DO NOT fall back to individual yfinance queries to prevent hanging.
         for code in stock_codes:
-            res[code] = (False, 999.0, {}, 0.0)
+            res[code] = (False, 999.0, {}, 0.0, False)
     return res
 
 def analyze_chip_and_ma_convergence(api_key, db_path=None):
@@ -1122,4 +1170,99 @@ def analyze_investor_conferences(api_key, db_path=None):
                 return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析亦無回應。"
         except Exception as fallback_err:
             return f"Gemini 產生法說會分析報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
+
+def analyze_surging_stocks(api_key, db_path=None):
+    """
+    從資料庫找出當月營收 YoY/MoM 異軍突起的個股，
+    並由 Gemini AI 聯網查詢其爆發原因，產出深度分析報告。
+    """
+    model_with_search = get_vertex_model(api_key, enable_search=True)
+    if not model_with_search:
+        return "Gemini API 金鑰未設定或初始化失敗，無法進行分析。"
+        
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    # 撈取當月最新營收且 YoY 成長強勁的個股 (包括大部分行業，篩選 YoY > 30% 且具備一定規模)
+    cursor.execute('''
+        SELECT stock_code, stock_name, industry, revenue, yoy, mom 
+        FROM monthly_revenue 
+        WHERE date_month = (SELECT MAX(date_month) FROM monthly_revenue)
+          AND yoy > 25 AND revenue > 20000
+        ORDER BY yoy DESC 
+        LIMIT 15
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return "目前資料庫中沒有符合篩選條件的異軍突起個股。"
+        
+    candidates = []
+    for r in rows:
+        rev_val = r['revenue']
+        yoy_val = r['yoy']
+        mom_val = r['mom']
+        rev_str = f"{rev_val/1000:.1f}" if rev_val is not None else "N/A"
+        yoy_str = f"{yoy_val:.1f}" if yoy_val is not None else "N/A"
+        mom_str = f"{mom_val:.1f}" if mom_val is not None else "N/A"
+        candidates.append(
+            f"- {r['stock_code']} {r['stock_name']} ({r['industry']}): 當月營收 {rev_str}百萬 (YoY: {yoy_str}%, MoM: {mom_str}%)"
+        )
+    candidates_str = "\n".join(candidates)
+    
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    prompt = f"""
+你是一位專業的台股投資策略分析師與產業研究員。
+當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
+
+我們從資料庫中篩選出了當前月份營收表現「異軍突起」（營收金額較高且年成長率 YoY 非常巨大）的台股候選名單：
+{candidates_str}
+
+請利用你的 Google 搜尋引擎聯網工具，深入查詢這幾檔個股近期營收爆增（飆升）的具體核心原因，並撰寫一份專業的**【台股當月營收異軍突起股深度解析報告】**。
+
+特別注意（請嚴格遵守）：
+1. 為了能讓程式系統自動提取代碼進行後續處理，請「務必」提供真實且正確的 4 位數字台股代號（例如 `[2330]`、`[2061]`、`[3231]` 等），請以方括號包圍。請確保代碼與公司名稱精確對應。
+2. 請「絕對不要」遮蔽、替代或隱藏股票代號（例如：不要寫成 [23XX]、[3XXX]、[XXXX] 或是 [xxxx]）。
+3. 區分「建材營造業」與「金融業」的一次性入帳或季節性變動，與「製造業/電子業/生技業」等實體產品銷售的「結構性爆發」。
+
+報告內容應包括：
+1. **異軍突起現象大解析**：簡述本月整體市場營收爆發的宏觀產業背景（例如：AI需求放量、晶片量產、新藥認證、訂單遞延等）。
+2. **營收爆發股核心原因剖析表**：以 Markdown 表格列出，包含：
+   - 股票代號與名稱（真實 4 位數字代號，如 `[3535] 晶彩科`）
+   - 產業別
+   - 本月營收與年增率 (YoY)
+   - 營收爆發核心具體原因摘要（如：特定產品出貨、特定大廠認證通過、合約認列等）
+   - 成長持續性評估（高/中/低）
+3. **重點突破個股逐一深度解析**：挑選 3-5 檔非單純建案一次性認列、最具基本面持續性或轉折題材的個股進行深度搜尋與點評，分析其產業地位、產能擴充狀況或主要客戶拉貨力道。
+4. **風險與操作建議**：警告投資人部分建材營造股營收一次性入帳、以及一次性授權金認列後，未來營收可能大幅下滑的風險。
+
+請以繁體中文撰寫，內容要具備高度專業度，使用 Markdown 格式呈現，多使用標題與加粗字體。
+"""
+    try:
+        response = model_with_search.generate_content(prompt)
+        report_content = response.text
+        if not report_content or not report_content.strip():
+            raise ValueError("API returned empty content")
+        save_gemini_report('surging_stocks_analysis', current_date_str[:7], report_content, db_path=db_path)
+        return report_content
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Search grounding failed for surging stocks: {error_msg}. Falling back...")
+        try:
+            model_no_search = get_vertex_model(api_key, enable_search=False)
+            if not model_no_search:
+                return f"Gemini 產生異軍突起分析報告失敗: {e}"
+            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請直接根據上述提供的數據進行產業特性分析與爆發原因推理。"
+            response_fallback = model_no_search.generate_content(fallback_prompt)
+            fallback_content = response_fallback.text
+            if fallback_content and fallback_content.strip():
+                save_gemini_report('surging_stocks_analysis', current_date_str[:7], fallback_content, db_path=db_path)
+                notice = f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地資料庫數據」進行分析。**\n\n"
+                return notice + fallback_content
+            else:
+                return f"Gemini 產生報告失敗: {e}，且備用本地分析亦無回應。"
+        except Exception as fallback_err:
+            return f"Gemini 產生報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
 
