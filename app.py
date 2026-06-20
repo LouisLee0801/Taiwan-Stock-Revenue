@@ -48,10 +48,10 @@ if 'active_dialog_stock' not in st.session_state:
 def get_yfinance_data(stock_code):
     import yfinance as yf
     ticker = f"{stock_code}.TW"
-    df = yf.download(ticker, period="6mo", progress=False)
+    df = yf.download(ticker, period="6mo", progress=False, timeout=8)
     if df.empty or len(df) < 5:
         ticker = f"{stock_code}.TWO"
-        df = yf.download(ticker, period="6mo", progress=False)
+        df = yf.download(ticker, period="6mo", progress=False, timeout=8)
     if not df.empty:
         df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
     return df, ticker

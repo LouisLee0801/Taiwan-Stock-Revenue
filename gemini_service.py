@@ -487,10 +487,10 @@ def get_latest_stock_price(stock_code):
     import yfinance as yf
     try:
         ticker = f"{stock_code}.TW"
-        df = yf.download(ticker, period="5d", progress=False)
+        df = yf.download(ticker, period="5d", progress=False, timeout=5)
         if df.empty or len(df) == 0:
             ticker = f"{stock_code}.TWO"
-            df = yf.download(ticker, period="5d", progress=False)
+            df = yf.download(ticker, period="5d", progress=False, timeout=5)
         if not df.empty:
             df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
             for val in reversed(df['Close'].tolist()):
@@ -658,7 +658,7 @@ def get_latest_stock_prices_batch(stock_codes):
         tickers.append(f"{c}.TW")
         tickers.append(f"{c}.TWO")
     try:
-        df = yf.download(tickers, period="5d", progress=False)
+        df = yf.download(tickers, period="5d", progress=False, timeout=10)
         if df.empty:
             return res
         if isinstance(df.columns, pd.MultiIndex):
@@ -678,17 +678,15 @@ def get_latest_stock_prices_batch(stock_codes):
                 if ticker in close_df.columns:
                     col_data = close_df[ticker]
                     for val in reversed(col_data.dropna().tolist()):
-                        price = float(val)
-                        break
+                         price = float(val)
+                         break
                 if price is not None:
                     break
             if price is not None:
                 res[code] = price
     except Exception as e:
         print(f"Error fetching batch stock prices: {e}")
-        # fallback to individual downloads
-        for code in stock_codes:
-            res[code] = get_latest_stock_price(code)
+        # DO NOT fall back to individual yfinance queries to prevent hanging.
     return res
 
 def analyze_turnaround_stocks(api_key, db_path=None):
@@ -744,13 +742,18 @@ def analyze_turnaround_stocks(api_key, db_path=None):
     for r in rows:
         code = r['stock_code']
         price = prices_map.get(code)
-        if price is None:
+        # 為了避免在 yfinance 被鎖時造成長時間掛起，只有在已篩選的數量小於 3 且沒拿到價格時才嘗試單獨查詢
+        if price is None and len(filtered_rows) < 3:
             price = get_latest_stock_price(code)
         
         # 篩選條件：1. 最新一季 EPS <= 0.2 或是 2. 股價低於 15 元
         if price is not None:
             if r['latest_eps'] <= 0.2 or price < 15:
                 filtered_rows.append((r, price))
+        else:
+            # 如果依然沒有取得價格，只要滿足最新一季 EPS <= 0.2 依然保留
+            if r['latest_eps'] <= 0.2:
+                filtered_rows.append((r, None))
                 
     filtered_rows = filtered_rows[:12]
     
@@ -867,10 +870,10 @@ def check_ma_convergence(stock_code):
     try:
         # 下載過去 90 天以確保能計算出 60MA
         ticker = f"{stock_code}.TW"
-        df = yf.download(ticker, period="90d", progress=False)
+        df = yf.download(ticker, period="90d", progress=False, timeout=5)
         if df.empty or len(df) == 0:
             ticker = f"{stock_code}.TWO"
-            df = yf.download(ticker, period="90d", progress=False)
+            df = yf.download(ticker, period="90d", progress=False, timeout=5)
             
         if df.empty or len(df) < 60:
             return False, 999.0, {}, 0.0
@@ -921,7 +924,7 @@ def check_ma_convergence_batch(stock_codes):
         tickers.append(f"{c}.TW")
         tickers.append(f"{c}.TWO")
     try:
-        df = yf.download(tickers, period="90d", progress=False)
+        df = yf.download(tickers, period="90d", progress=False, timeout=10)
         if df.empty:
             return res
         if isinstance(df.columns, pd.MultiIndex):
@@ -943,38 +946,38 @@ def check_ma_convergence_batch(stock_codes):
             for t_suffix in [".TW", ".TWO"]:
                 ticker = f"{code}{t_suffix}"
                 if ticker in close_df.columns:
-                    series = close_df[ticker].dropna()
-                    if len(series) >= 60:
-                        try:
-                            ma5 = float(series.rolling(5).mean().iloc[-1])
-                            ma10 = float(series.rolling(10).mean().iloc[-1])
-                            ma20 = float(series.rolling(20).mean().iloc[-1])
-                            ma60 = float(series.rolling(60).mean().iloc[-1])
-                            price = float(series.iloc[-1])
-                            
-                            mas = [ma5, ma10, ma20, ma60]
-                            max_ma = max(mas)
-                            min_ma = min(mas)
-                            spread_val = ((max_ma - min_ma) / price) * 100
-                            
-                            ma_dict = {
-                                '5MA': round(ma5, 2),
-                                '10MA': round(ma10, 2),
-                                '20MA': round(ma20, 2),
-                                '60MA': round(ma60, 2)
-                            }
-                            current_price = round(price, 2)
-                            spread = round(spread_val, 2)
-                            success = True
-                            break
-                        except Exception as e:
-                            print(f"Error calculating MA for {code}: {e}")
+                     series = close_df[ticker].dropna()
+                     if len(series) >= 60:
+                         try:
+                             ma5 = float(series.rolling(5).mean().iloc[-1])
+                             ma10 = float(series.rolling(10).mean().iloc[-1])
+                             ma20 = float(series.rolling(20).mean().iloc[-1])
+                             ma60 = float(series.rolling(60).mean().iloc[-1])
+                             price = float(series.iloc[-1])
+                             
+                             mas = [ma5, ma10, ma20, ma60]
+                             max_ma = max(mas)
+                             min_ma = min(mas)
+                             spread_val = ((max_ma - min_ma) / price) * 100
+                             
+                             ma_dict = {
+                                 '5MA': round(ma5, 2),
+                                 '10MA': round(ma10, 2),
+                                 '20MA': round(ma20, 2),
+                                 '60MA': round(ma60, 2)
+                             }
+                             current_price = round(price, 2)
+                             spread = round(spread_val, 2)
+                             success = True
+                             break
+                         except Exception as e:
+                             print(f"Error calculating MA for {code}: {e}")
             res[code] = (success, spread, ma_dict, current_price)
     except Exception as e:
         print(f"Error checking batch MA convergence: {e}")
-        # fallback to individual calculations
+        # DO NOT fall back to individual yfinance queries to prevent hanging.
         for code in stock_codes:
-            res[code] = check_ma_convergence(code)
+            res[code] = (False, 999.0, {}, 0.0)
     return res
 
 def analyze_chip_and_ma_convergence(api_key, db_path=None):
