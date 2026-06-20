@@ -16,58 +16,37 @@ def write_gemini_debug(msg):
     except Exception as e:
         print(f"Failed to write debug log: {e}")
 
-def get_gemini_model(api_key=None, model_name="gemini-3.5-flash", enable_search=False):
-    """初始化並傳回適合的 Gemini 模式，若型態已棄用則動態選取最新可用型態"""
+def get_gemini_model(api_key=None, model_name="gemini-2.5-flash", enable_search=False):
+    """初始化並傳回適合的 Gemini 模式，以靜態且高效的方式選取最新可用型態"""
     if not api_key:
         api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         write_gemini_debug("get_gemini_model failed: No API Key provided.")
         return None
         
-    # 主動阻斷已棄用的 gemini-1.5-flash 與 gemini-2.0-flash，升級為最新的 3.5-flash
-    if model_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
-        model_name = "gemini-3.5-flash"
+    # 主動映射已退役或不存在的模型到最新的穩定版模型 (gemini-2.5-flash)
+    # 避免發起 list_models 網路請求以防止連線掛起
+    if model_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.5-flash"]:
+        model_name = "gemini-2.5-flash"
         
     key_preview = f"{api_key[:6]}...{api_key[-4:]}" if len(api_key) > 10 else "invalid_key"
     write_gemini_debug(f"Configuring Gemini Client. Key: {key_preview}, Target model: {model_name}, Search: {enable_search}")
     try:
         genai.configure(api_key=api_key)
-        # 進行動態模型選取
-        selected_model_name = model_name
-        try:
-            available_models = [m.name for m in genai.list_models()]
-            write_gemini_debug(f"Available models: {available_models}")
-            candidates = [
-                'models/gemini-3.5-flash',
-                'models/gemini-3.1-flash-lite',
-                'models/gemini-2.5-flash'
-            ]
-            # 如果預設傳入的 model_name 不在可用清單中，從候選清單中選取一個可用的
-            if f"models/{model_name}" not in available_models and model_name not in available_models:
-                for candidate in candidates:
-                    if candidate in available_models:
-                        selected_model_name = candidate.replace('models/', '')
-                        break
-        except Exception as list_err:
-            write_gemini_debug(f"Could not list models: {list_err}. Falling back to default model_name.")
-            # 如果列表失敗，且預設是已退役的 1.5-flash / 2.0-flash，則直接升級為 3.5-flash
-            if selected_model_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
-                selected_model_name = "gemini-3.5-flash"
-        
-        write_gemini_debug(f"Selected model name: {selected_model_name}")
+        write_gemini_debug(f"Selected model name: {model_name}")
         # 如果需要啟用 Google Search Grounding
         if enable_search:
             return genai.GenerativeModel(
-                model_name=selected_model_name,
+                model_name=model_name,
                 tools=[protos.Tool(google_search=protos.Tool.GoogleSearch())]
             )
         else:
-            return genai.GenerativeModel(selected_model_name)
+            return genai.GenerativeModel(model_name)
     except Exception as e:
         write_gemini_debug(f"Error configuring Gemini client: {e}")
         return None
 
-def get_vertex_model(project_id=None, model_name="gemini-3.5-flash", enable_search=False):
+def get_vertex_model(project_id=None, model_name="gemini-2.5-flash", enable_search=False):
     """相容性別名包裝，供現有函式呼叫使用"""
     return get_gemini_model(api_key=project_id, model_name=model_name, enable_search=enable_search)
 
