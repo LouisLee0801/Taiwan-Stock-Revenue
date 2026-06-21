@@ -729,13 +729,22 @@ def analyze_turnaround_stocks(api_key, db_path=None):
         is_20ma_rising = False
         
         if tech_val:
-            success, spread, mas, price, is_20ma_rising = tech_val
+            if len(tech_val) == 4:
+                success, spread, mas, price = tech_val
+                is_20ma_rising = False
+            else:
+                success, spread, mas, price, is_20ma_rising = tech_val
             
         # 為了避免在 yfinance 被鎖時造成長時間掛起，只有在已篩選的數量小於 3 且沒拿到價格時才嘗試單獨查詢
         if price is None and len(filtered_rows) < 3:
             price = get_latest_stock_price(code)
             if price is not None:
-                ind_success, ind_spread, ind_mas, _, ind_is_20ma_rising = check_ma_convergence(code)
+                ind_res = check_ma_convergence(code)
+                if len(ind_res) == 4:
+                    ind_success, ind_spread, ind_mas, _ = ind_res
+                    ind_is_20ma_rising = False
+                else:
+                    ind_success, ind_spread, ind_mas, _, ind_is_20ma_rising = ind_res
                 if ind_success:
                     spread = ind_spread
                     is_20ma_rising = ind_is_20ma_rising
@@ -1198,29 +1207,47 @@ def analyze_surging_stocks(api_key, db_path=None):
     if not rows:
         return "目前資料庫中沒有符合篩選條件的異軍突起個股。"
         
+    # 批次查詢均線糾結度、即時股價與 20MA 趨勢
+    tech_map = check_ma_convergence_batch([r['stock_code'] for r in rows])
+    
     candidates = []
     for r in rows:
+        code = r['stock_code']
         rev_val = r['revenue']
         yoy_val = r['yoy']
         mom_val = r['mom']
         rev_str = f"{rev_val/1000:.1f}" if rev_val is not None else "N/A"
         yoy_str = f"{yoy_val:.1f}" if yoy_val is not None else "N/A"
         mom_str = f"{mom_val:.1f}" if mom_val is not None else "N/A"
+        
+        tech_val = tech_map.get(code)
+        tech_str = "無法取得即時技術指標"
+        if tech_val:
+            if len(tech_val) == 4:
+                success, spread, mas, price = tech_val
+                is_20ma_rising = False
+            else:
+                success, spread, mas, price, is_20ma_rising = tech_val
+            
+            if success:
+                trend_str = "20MA趨勢向上" if is_20ma_rising else "20MA趨勢向下/持平"
+                tech_str = f"實時股價 {price}元, 均線糾結度 {spread}%, {trend_str}"
+                
         candidates.append(
-            f"- {r['stock_code']} {r['stock_name']} ({r['industry']}): 當月營收 {rev_str}百萬 (YoY: {yoy_str}%, MoM: {mom_str}%)"
+            f"- {code} {r['stock_name']} ({r['industry']}): 當月營收 {rev_str}百萬 (YoY: {yoy_str}%, MoM: {mom_str}%) | 技術狀態: {tech_str}"
         )
     candidates_str = "\n".join(candidates)
     
     current_date_str = datetime.now().strftime("%Y-%m-%d")
     
     prompt = f"""
-你是一位專業的台股投資策略分析師與產業研究員。
+你是一位專業的台股投資策略分析師與產業研究員，專精於結合基本面營收暴增、籌碼面主力囤貨與技術面均線收斂起漲的「三合一共振」選股策略。
 當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
 
 我們從資料庫中篩選出了當前月份營收表現「異軍突起」（營收金額較高且年成長率 YoY 非常巨大）的台股候選名單：
 {candidates_str}
 
-請利用你的 Google 搜尋引擎聯網工具，深入查詢這幾檔個股近期營收爆增（飆升）的具體核心原因，並撰寫一份專業的**【台股當月營收異軍突起股深度解析報告】**。
+請利用你的 Google 搜尋引擎聯網工具，深入查詢這幾檔個股近期營收暴增（飆升）的具體核心原因，並特別結合**【籌碼面主力分點買超/集中度上升】與【技術面均線高度糾結收斂後起漲/突破】的圖形特徵**進行綜合研判，撰寫一份專業的**【台股當月營收異軍突起與籌碼技術三合一深度解析報告】**。
 
 特別注意（請嚴格遵守）：
 1. 為了能讓程式系統自動提取代碼進行後續處理，請「務必」提供真實且正確的 4 位數字台股代號（例如 `[2330]`、`[2061]`、`[3231]` 等），請以方括號包圍。請確保代碼與公司名稱精確對應。
@@ -1228,15 +1255,19 @@ def analyze_surging_stocks(api_key, db_path=None):
 3. 區分「建材營造業」與「金融業」的一次性入帳或季節性變動，與「製造業/電子業/生技業」等實體產品銷售的「結構性爆發」。
 
 報告內容應包括：
-1. **異軍突起現象大解析**：簡述本月整體市場營收爆發的宏觀產業背景（例如：AI需求放量、晶片量產、新藥認證、訂單遞延等）。
-2. **營收爆發股核心原因剖析表**：以 Markdown 表格列出，包含：
+1. **異軍突起與籌碼/技術共振大解析**：簡述本月整體市場營收爆發的宏觀產業背景，並說明當「營收結構性暴增」伴隨「主力分點悄悄囤貨（籌碼集中）」且技術面上「短期/中期/長期均線高度糾結整理收斂後，股價帶量突破/20MA上揚起漲」時（即底部成形、長黑/盤整後帶量突破的完美圖形），對於後市噴發幅度的加乘效應。
+2. **營收爆發股核心原因與籌碼技術剖析表**：以 Markdown 表格列出，包含：
    - 股票代號與名稱（真實 4 位數字代號，如 `[3535] 晶彩科`）
    - 產業別
    - 本月營收與年增率 (YoY)
-   - 營收爆發核心具體原因摘要（如：特定產品出貨、特定大廠認證通過、合約認列等）
-   - 成長持續性評估（高/中/低）
-3. **重點突破個股逐一深度解析**：挑選 3-5 檔非單純建案一次性認列、最具基本面持續性或轉折題材的個股進行深度搜尋與點評，分析其產業地位、產能擴充狀況或主要客戶拉貨力道。
-4. **風險與操作建議**：警告投資人部分建材營造股營收一次性入帳、以及一次性授權金認列後，未來營收可能大幅下滑的風險。
+   - 營收爆發核心具體原因摘要
+   - 籌碼與技術面現況（有無特定主力分點囤貨、均線是否糾結/呈起漲噴發型態）
+   - 成長持續性與圖形爆發評級（高/中/低）
+3. **重點突破個股逐一深度解析**：挑選 3-5 檔非單純建案一次性認列、最符合「營收爆發+籌碼集中+均線糾結起漲」圖形的個股進行深度點評：
+   - 分析其產品線爆發與訂單核心動能。
+   - **籌碼面分析**：指出是否有特定主力券商分點（如：台灣摩根士丹利、元大松山、凱基台北、特定關鍵大戶分點）在過去數週持續買進，且籌碼集中度顯著上升。
+   - **技術面圖形分析**：分析其日K線圖形，是否正處於均線（5MA/10MA/20MA/60MA）極度糾結盤整、20MA 正式向上翻揚、或突破下降軌道/箱型整理的關鍵買點圖形。
+4. **風險與操作建議**：警告投資人一次性授權金認列、營收假突破、以及主力短線分點假鎖碼出貨的風險。
 
 請以繁體中文撰寫，內容要具備高度專業度，使用 Markdown 格式呈現，多使用標題與加粗字體。
 """

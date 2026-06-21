@@ -62,7 +62,16 @@ def draw_k_line_chart(stock_code):
         st.warning(f"無法取得 {stock_code} 的 K 線數據。")
         return None
         
-    fig = go.Figure(data=[go.Candlestick(
+    # 計算均線
+    df_stock['5MA'] = df_stock['Close'].rolling(window=5).mean()
+    df_stock['10MA'] = df_stock['Close'].rolling(window=10).mean()
+    df_stock['20MA'] = df_stock['Close'].rolling(window=20).mean()
+    df_stock['60MA'] = df_stock['Close'].rolling(window=60).mean()
+
+    fig = go.Figure()
+    
+    # 增加日 K 線
+    fig.add_trace(go.Candlestick(
         x=df_stock.index,
         open=df_stock['Open'],
         high=df_stock['High'],
@@ -71,18 +80,26 @@ def draw_k_line_chart(stock_code):
         name='日K線',
         increasing_line_color='#E53E3E', # 紅漲 (TW Stock UP)
         decreasing_line_color='#2F855A'  # 綠跌 (TW Stock DOWN)
-    )])
+    ))
+    
+    # 增加均線 Trace (使用與使用者上傳圖形高度相似的配色系統)
+    fig.add_trace(go.Scatter(x=df_stock.index, y=df_stock['5MA'], mode='lines', name='5MA', line=dict(color='#FFA500', width=1.2)))      # 橘色
+    fig.add_trace(go.Scatter(x=df_stock.index, y=df_stock['10MA'], mode='lines', name='10MA', line=dict(color='#00BFFF', width=1.2)))  # 淺藍
+    fig.add_trace(go.Scatter(x=df_stock.index, y=df_stock['20MA'], mode='lines', name='20MA', line=dict(color='#FF1493', width=1.5)))  # 粉紅
+    fig.add_trace(go.Scatter(x=df_stock.index, y=df_stock['60MA'], mode='lines', name='60MA', line=dict(color='#228B22', width=2)))    # 綠色
     
     fig.update_layout(
-        title=f"{stock_code} 過去半年日 K 線圖 ({ticker})",
+        title=f"{stock_code} 過去半年日 K 線與均線圖 ({ticker})",
         xaxis_title="日期",
         yaxis_title="股價 (TWD)",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         font_color='#1E293B',
         xaxis_rangeslider_visible=False,
-        height=400
+        height=450,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
+    
     fig.update_xaxes(showgrid=True, gridcolor='#F1F5F9')
     fig.update_yaxes(showgrid=True, gridcolor='#F1F5F9')
     return fig
@@ -105,10 +122,14 @@ def get_ma_convergence_table_data(report_text):
         r = cursor.fetchone()
         conn.close()
         name = r['stock_name'] if r else "未知"
-        
         res_val = batch_results.get(code)
         if res_val:
-            success, spread, mas, price, is_20ma_rising = res_val
+            # 增加防禦性檢查，避免因為快取或版本不一致導致 4 元素與 5 元素元組解包失敗
+            if len(res_val) == 4:
+                success, spread, mas, price = res_val
+                is_20ma_rising = False
+            else:
+                success, spread, mas, price, is_20ma_rising = res_val
             if success:
                 # 決定燈號
                 if spread < 3.0:
