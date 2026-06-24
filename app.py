@@ -104,6 +104,81 @@ def draw_k_line_chart(stock_code):
     fig.update_yaxes(showgrid=True, gridcolor='#F1F5F9')
     return fig
 
+
+def draw_k_line_chart_with_52w(stock_code):
+    import yfinance as yf
+    import pandas as pd
+    import plotly.graph_objects as go
+    
+    ticker = f"{stock_code}.TW"
+    df = yf.download(ticker, period="1y", progress=False, timeout=8)
+    if df.empty or len(df) < 5:
+        ticker = f"{stock_code}.TWO"
+        df = yf.download(ticker, period="1y", progress=False, timeout=8)
+    if df.empty:
+        st.warning(f"無法取得 {stock_code} 的 K 線數據。")
+        return None
+        
+    df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
+    
+    # 計算均線
+    df['5MA'] = df['Close'].rolling(window=5).mean()
+    df['10MA'] = df['Close'].rolling(window=10).mean()
+    df['20MA'] = df['Close'].rolling(window=20).mean()
+    df['60MA'] = df['Close'].rolling(window=60).mean()
+    
+    # 52週高點 (以過去 250 天最大值計算)
+    high_52w = float(df['High'].max())
+    
+    # 僅顯示過去半年 (約120天)
+    df_plot = df.iloc[-120:]
+    
+    fig = go.Figure()
+    
+    # 增加日 K 線
+    fig.add_trace(go.Candlestick(
+        x=df_plot.index,
+        open=df_plot['Open'],
+        high=df_plot['High'],
+        low=df_plot['Low'],
+        close=df_plot['Close'],
+        name='日K線',
+        increasing_line_color='#E53E3E',
+        decreasing_line_color='#2F855A'
+    ))
+    
+    # 增加均線
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['5MA'], mode='lines', name='5MA', line=dict(color='#FFA500', width=1.2)))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['10MA'], mode='lines', name='10MA', line=dict(color='#00BFFF', width=1.2)))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['20MA'], mode='lines', name='20MA', line=dict(color='#FF1493', width=1.5)))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['60MA'], mode='lines', name='60MA', line=dict(color='#228B22', width=2)))
+    
+    # 增加 52W 高點水平線
+    fig.add_hline(
+        y=high_52w, 
+        line_dash="dash", 
+        line_color="#E53E3E", 
+        line_width=1.5,
+        annotation_text=f"52W 高點: {high_52w} 元", 
+        annotation_position="top left",
+        annotation_font_color="#E53E3E"
+    )
+    
+    fig.update_layout(
+        title=f"{stock_code} 實時均線與 52W 高點 K 線圖 ({ticker})",
+        xaxis_title="日期",
+        yaxis_title="股價 (TWD)",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font_color='#1E293B',
+        xaxis_rangeslider_visible=False,
+        height=480,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='#F1F5F9')
+    fig.update_yaxes(showgrid=True, gridcolor='#F1F5F9')
+    return fig
+
 @st.cache_data(ttl=1800)
 def get_ma_convergence_table_data(report_text):
     from gemini_service import extract_valid_stock_codes, check_ma_convergence_batch
@@ -1400,10 +1475,43 @@ elif choice == "🚀 當月異軍突起股":
     if df_surging.empty:
         st.info("目前條件下無符合的異軍突起股，請放寬篩選標準。")
     else:
-        st.markdown(f"### 📊 當月高成長個股清單 (共 {len(df_surging)} 檔)")
-        # 複製一份做格式化顯示
+        st.markdown(f"### 📊 當月高成長與技術/籌碼篩選表 (共 {len(df_surging)} 檔)")
+        st.caption("以下表格已串接即時技術指標。您可以點擊欄位標頭進行排序（例如點擊「接近52週高點 (%)」或「5-20MA糾結度 (%)」）以快速篩選最完美的起漲點型態。")
+        
+        # 批次查詢技術指標
+        with st.spinner("正在計算候選股之即時均線糾結度與 52 週高點位置..."):
+            from gemini_service import check_surging_technical_batch
+            tech_results = check_surging_technical_batch(df_surging['stock_code'].tolist())
+            
         df_display = df_surging.copy()
         df_display['revenue'] = df_display['revenue'] / 1000.0  # 轉為百萬
+        
+        # 初始化技術面欄位
+        prices = []
+        spreads_short = []
+        trends_20ma = []
+        proximities_52w = []
+        
+        for _, row in df_display.iterrows():
+            code = row['stock_code']
+            res_val = tech_results.get(code)
+            if res_val and res_val[0]:  # success
+                _, p, sp_s, sp_a, tr_20, h52, prox52 = res_val
+                prices.append(p)
+                spreads_short.append(sp_s)
+                trends_20ma.append("📈 向上" if tr_20 else "📉 向下/持平")
+                proximities_52w.append(prox52)
+            else:
+                prices.append(None)
+                spreads_short.append(None)
+                trends_20ma.append("未知")
+                proximities_52w.append(None)
+                
+        df_display['即時股價'] = prices
+        df_display['5-20MA糾結度 (%)'] = spreads_short
+        df_display['20MA趨勢'] = trends_20ma
+        df_display['接近52週高點 (%)'] = proximities_52w
+        
         df_display = df_display.rename(columns={
             'stock_code': '股票代號',
             'stock_name': '股票名稱',
@@ -1412,11 +1520,93 @@ elif choice == "🚀 當月異軍突起股":
             'yoy': '營收年增率 (YoY %)',
             'mom': '營收月增率 (MoM %)'
         })
-        # 格式化顯示
+        
+        # 顯示包含技術篩選屬性的 dataframe
         st.dataframe(
-            df_display[['股票代號', '股票名稱', '產業別', '當月營收 (百萬元)', '營收年增率 (YoY %)', '營收月增率 (MoM %)']],
+            df_display[[
+                '股票代號', '股票名稱', '產業別', '當月營收 (百萬元)', 
+                '營收年增率 (YoY %)', '營收月增率 (MoM %)', '即時股價', 
+                '5-20MA糾結度 (%)', '20MA趨勢', '接近52週高點 (%)'
+            ]],
             use_container_width=True
         )
+        
+        # 個股技術與籌碼交互深度解析
+        st.write("---")
+        st.markdown("### 🔍 個股 K 線圖（包含 5/10/20/60MA 與 52W 高點）及 AI 即時籌碼分析")
+        st.caption("選取下方高成長個股，即時查看其「均線糾結起漲 K 線」與「主力分點大戶吃貨」AI 深度聯網分析報告。")
+        
+        stock_options = [f"{row['股票代號']} {row['股票名稱']}" for _, row in df_display.iterrows()]
+        selected_stock_str = st.selectbox("選取要進行深度剖析的個股", stock_options, key='surging_stock_select')
+        
+        if selected_stock_str:
+            stock_code = selected_stock_str.split()[0]
+            stock_name = selected_stock_str.split()[1]
+            
+            tab_chart, tab_chip = st.tabs(["📈 即時均線與 52W 高點 K 線圖", "🔮 該股籌碼與分點 AI 即時聯網大解析"])
+            
+            with tab_chart:
+                with st.spinner(f"正在加載 {selected_stock_str} 的技術圖形與均線..."):
+                    fig_52w = draw_k_line_chart_with_52w(stock_code)
+                    if fig_52w:
+                        st.plotly_chart(fig_52w, use_container_width=True)
+                        st.caption("註：紅虛線為過去 52 週（約 1 年）盤中最高價位。橘線 5MA、淺藍線 10MA、粉紅線 20MA、綠線 60MA。均線越靠攏且接近 52W 高點突破，越符合起漲共振訊號。")
+            
+            with tab_chip:
+                api_key = st.session_state.get('api_key_input')
+                if not api_key:
+                    st.warning("⚠️ 請先在側邊欄配置您的 Gemini API Key 以啟用個股聯網 AI 即時籌碼分析！")
+                else:
+                    # 檢查個股籌碼報告快取
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT report_content, updated_at FROM gemini_reports WHERE report_type = 'stock_chip_detail' AND report_key = ?",
+                        (stock_code,)
+                    )
+                    row = cursor.fetchone()
+                    conn.close()
+                    
+                    if row:
+                        st.success(f"已載入 {selected_stock_str} 的籌碼分析報告。 (更新時間: {row['updated_at']})")
+                        st.markdown(row['report_content'])
+                        st.write("---")
+                        if st.button(f"🔄 重新分析 {stock_name} 主力分點與籌碼", key=f"re_run_chip_detail_{stock_code}"):
+                            with st.spinner(f"正在透過 AI 聯網查詢 {selected_stock_str} 最近分點囤貨與大戶鎖碼特徵..."):
+                                from gemini_service import get_single_stock_chip_analysis
+                                report = get_single_stock_chip_analysis(api_key, stock_code, stock_name)
+                                if "失敗" not in report and "未設定" not in report:
+                                    conn = get_connection()
+                                    cursor = conn.cursor()
+                                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    cursor.execute(
+                                        "INSERT OR REPLACE INTO gemini_reports (report_type, report_key, report_content, updated_at) VALUES ('stock_chip_detail', ?, ?, ?)",
+                                        (stock_code, report, current_time)
+                                    )
+                                    conn.commit()
+                                    conn.close()
+                                    st.rerun()
+                                else:
+                                    st.error(report)
+                    else:
+                        st.info("💡 該股目前尚無籌碼分析報告。點擊下方按鈕，AI 將即時進行聯網大數據搜尋，深入剖析特定主力券商分點囤貨動向。")
+                        if st.button(f"🚀 啟動 {stock_name} AI 聯網籌碼與分點深度解析", key=f"run_chip_detail_{stock_code}"):
+                            with st.spinner(f"正在透過 AI 聯網查詢 {selected_stock_str} 最近分點囤貨與大戶鎖碼特徵..."):
+                                from gemini_service import get_single_stock_chip_analysis
+                                report = get_single_stock_chip_analysis(api_key, stock_code, stock_name)
+                                if "失敗" not in report and "未設定" not in report:
+                                    conn = get_connection()
+                                    cursor = conn.cursor()
+                                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    cursor.execute(
+                                        "INSERT OR REPLACE INTO gemini_reports (report_type, report_key, report_content, updated_at) VALUES ('stock_chip_detail', ?, ?, ?)",
+                                        (stock_code, report, current_time)
+                                    )
+                                    conn.commit()
+                                    conn.close()
+                                    st.rerun()
+                                else:
+                                    st.error(report)
         
         st.write("---")
         st.markdown("### 🔮 Gemini AI 聯網異軍突起原因解析")

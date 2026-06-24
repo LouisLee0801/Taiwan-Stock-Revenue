@@ -1297,3 +1297,149 @@ def analyze_surging_stocks(api_key, db_path=None):
         except Exception as fallback_err:
             return f"Gemini 產生報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
 
+
+def check_surging_technical_batch(stock_codes):
+    """
+    批次計算多個個股的技術指標，包含：
+    1. 實時股價
+    2. 短期均線糾結度 (5MA, 10MA, 20MA)
+    3. 全期均線糾結度 (5MA, 10MA, 20MA, 60MA)
+    4. 20MA 趨勢 (是否向上)
+    5. 52週高點與接近程度
+    回傳: {stock_code: (success, price, spread_short, spread_all, is_20ma_rising, high_52w, proximity_52w)}
+    """
+    import yfinance as yf
+    import pandas as pd
+    res = {}
+    if not stock_codes:
+        return res
+    tickers = []
+    for c in stock_codes:
+        tickers.append(f"{c}.TW")
+        tickers.append(f"{c}.TWO")
+    try:
+        # 下載過去 1 年 (52週) 的數據來計算 52W 新高與 60MA
+        df = yf.download(tickers, period="1y", progress=False, timeout=12)
+        if df.empty:
+            return res
+        if isinstance(df.columns, pd.MultiIndex):
+            if 'Close' in df.columns.levels[0]:
+                close_df = df['Close']
+            elif 'Close' in df.columns.levels[1]:
+                close_df = df.xs('Close', axis=1, level=1)
+            else:
+                close_df = pd.DataFrame()
+                
+            if 'High' in df.columns.levels[0]:
+                high_df = df['High']
+            elif 'High' in df.columns.levels[1]:
+                high_df = df.xs('High', axis=1, level=1)
+            else:
+                high_df = pd.DataFrame()
+        else:
+            close_df = df[['Close']] if 'Close' in df.columns else pd.DataFrame()
+            high_df = df[['High']] if 'High' in df.columns else pd.DataFrame()
+            
+        for code in stock_codes:
+            success = False
+            price = 0.0
+            spread_short = 999.0
+            spread_all = 999.0
+            is_20ma_rising = False
+            high_52w = 0.0
+            proximity_52w = 0.0
+            
+            for t_suffix in [".TW", ".TWO"]:
+                ticker = f"{code}{t_suffix}"
+                if ticker in close_df.columns:
+                    series = close_df[ticker].dropna()
+                    high_series = high_df[ticker].dropna() if ticker in high_df.columns else series
+                    if len(series) >= 60:
+                        try:
+                            ma5 = float(series.rolling(5).mean().iloc[-1])
+                            ma10 = float(series.rolling(10).mean().iloc[-1])
+                            ma20 = float(series.rolling(20).mean().iloc[-1])
+                            ma60 = float(series.rolling(60).mean().iloc[-1])
+                            curr_price = float(series.iloc[-1])
+                            
+                            # 52週高點 (以過去 250 天最大值計算)
+                            h52w = float(high_series.max())
+                            
+                            # 糾結度
+                            mas_short = [ma5, ma10, ma20]
+                            spread_s = ((max(mas_short) - min(mas_short)) / curr_price) * 100
+                            
+                            mas_all = [ma5, ma10, ma20, ma60]
+                            spread_a = ((max(mas_all) - min(mas_all)) / curr_price) * 100
+                            
+                            # 20MA 趨勢
+                            is_20ma_rising_val = False
+                            if len(series) >= 25:
+                                ma20_prev = float(series.rolling(20).mean().iloc[-5])
+                                ma20_curr = float(series.rolling(20).mean().iloc[-1])
+                                is_20ma_rising_val = ma20_curr > ma20_prev
+                            
+                            price = round(curr_price, 2)
+                            spread_short = round(spread_s, 2)
+                            spread_all = round(spread_a, 2)
+                            is_20ma_rising = is_20ma_rising_val
+                            high_52w = round(h52w, 2)
+                            proximity_52w = round((curr_price / h52w) * 100, 2) if h52w > 0 else 0.0
+                            success = True
+                            break
+                        except Exception as e:
+                            print(f"Error calculating surging tech for {code}: {e}")
+            res[code] = (success, price, spread_short, spread_all, is_20ma_rising, high_52w, proximity_52w)
+    except Exception as e:
+        print(f"Error checking batch surging technicals: {e}")
+        for code in stock_codes:
+            res[code] = (False, 0.0, 999.0, 999.0, False, 0.0, 0.0)
+    return res
+
+
+def get_single_stock_chip_analysis(api_key, stock_code, stock_name, db_path=None):
+    """
+    針對特定個股進行即時「特定分點買超、主力囤貨、籌碼集中度」的 AI 聯網分析。
+    """
+    model_with_search = get_vertex_model(api_key, enable_search=True)
+    if not model_with_search:
+        return "Gemini API 金鑰未設定或初始化失敗，無法進行個股籌碼分析。"
+        
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+    prompt = f"""
+你是一位專業的台股籌碼分析專家。
+當前系統時間是：{current_date_str}。
+
+請利用你的 Google 搜尋引擎聯網工具，搜尋近期一個月內關於台股個股 {stock_code} {stock_name} 的特定券商分點買賣超動態、主力進出、大戶鎖碼、以及籌碼集中度變化的財經新聞與討論。
+
+請針對 {stock_code} {stock_name} 提供一份**【個股即時籌碼面與分點動態解析】**：
+1. **主力與特定分點進出**：指出過去數週是否有特定證券商分點（例如：外資、投信的特定分點，或是主力大戶如凱基台北、美商高盛、台灣摩根士丹利、元大松山等）在持續囤貨、大量買超或賣出。如果搜尋到具體買超分點，請明確寫出。
+2. **籌碼集中度現況**：說明該股目前的籌碼結構，是趨於集中還是分散？大戶持股比例是否增加？
+3. **題材與主力囤貨動機**：主力在吸貨/收購背後的近期利多題材或潛在驅動因素（如新單、技術突破、法說會展望良好等）。
+4. **綜合評分與操作建議**：給予該股「籌碼集中度評級」（高/中/低），並從籌碼面角度給予操作上的具體防守點或買賣操作建議。
+
+請以繁體中文撰寫，內容要具備高度專業度，使用 Markdown 格式呈現，多使用標題與加粗字體。
+"""
+    try:
+        response = model_with_search.generate_content(prompt)
+        report_content = response.text
+        if not report_content or not report_content.strip():
+            raise ValueError("API returned empty content")
+        return report_content
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Search grounding failed for single stock chip analysis: {error_msg}. Falling back...")
+        try:
+            model_no_search = get_vertex_model(api_key, enable_search=False)
+            if not model_no_search:
+                return f"Gemini 產生個股籌碼分析報告失敗: {e}"
+            fallback_prompt = prompt + "\n\n⚠️ 提示：由於聯網搜尋工具目前不可用，請根據您對該個股近期籌碼趨向、分點行為及市場題材的歷史知識進行深度解析。"
+            response_fallback = model_no_search.generate_content(fallback_prompt)
+            fallback_content = response_fallback.text
+            if fallback_content and fallback_content.strip():
+                return f"⚠️ **提示：API 聯網搜尋失敗（詳細原因：`{error_msg}`），已自動退回使用「本地 AI 知識庫」分析。**\n\n" + fallback_content
+            else:
+                return f"Gemini 產生報告失敗: {e}，且備用本地分析亦無回應。"
+        except Exception as fallback_err:
+            return f"Gemini 產生報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
+
