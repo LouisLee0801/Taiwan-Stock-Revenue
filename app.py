@@ -1829,6 +1829,12 @@ elif choice == "📈 評等調整追蹤":
         st.markdown("### 🤖 AI 智慧聯網全自動掃描今日評等")
         st.write("點擊下方按鈕，AI 將自動聯網（透過 Google Search Grounding）檢索近期台灣股市上有關各大外資與投信最新出爐的評等調整與目標價報告，並自動解析與寫入您的資料庫。")
         
+        # 顯示最近一次的掃描狀態與更新時間
+        if 'rating_scan_success' in st.session_state:
+            st.success(st.session_state.rating_scan_success)
+        if 'rating_scan_error' in st.session_state:
+            st.error(st.session_state.rating_scan_error)
+            
         api_key = st.session_state.get('api_key_input')
         if not api_key:
             st.warning("⚠️ 請先在側邊欄配置您的 Gemini API Key 以啟用 AI 聯網掃描！")
@@ -1837,11 +1843,15 @@ elif choice == "📈 評等調整追蹤":
                 with st.spinner("AI 正在聯網搜集今日最新外資/投信評等調整報告，並自動提取 PE 與原因，請稍候... (這大約需要 20-30 秒)"):
                     from gemini_service import scan_broker_ratings
                     res_msg = scan_broker_ratings(api_key, db_path=None)
+                    
+                    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     if "失敗" in res_msg or "error" in res_msg.lower():
-                        st.error(res_msg)
+                        st.session_state.rating_scan_error = f"❌ {res_msg} | 執行時間: {current_time_str}"
+                        st.session_state.pop('rating_scan_success', None)
                     else:
-                        st.success(res_msg)
-                        st.rerun()
+                        st.session_state.rating_scan_success = f"✔ {res_msg} | 執行時間: {current_time_str}"
+                        st.session_state.pop('rating_scan_error', None)
+                    st.rerun()
 
 # --- 4. 頁面：Gemini AI 投資顧問 ---
 elif choice == "🤖 Gemini AI 投資顧問":
