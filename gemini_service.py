@@ -1519,6 +1519,24 @@ def scan_broker_ratings(api_key, db_path=None):
             
         conn = get_connection(db_path)
         cursor = conn.cursor()
+        # 確保資料表一定存在，避免部署/快取不同步導致查詢出錯
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rating_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,                    -- 調整日期 (YYYY-MM-DD)
+                stock_code TEXT,              -- 股票代號
+                stock_name TEXT,              -- 股票名稱
+                broker TEXT,                  -- 報告券商/研究機構
+                original_rating TEXT,         -- 原評等
+                new_rating TEXT,              -- 新評等
+                target_price REAL,            -- 目標價
+                reason TEXT,                  -- 調整原因與分析
+                current_pe REAL,              -- 現行 PE
+                adjusted_pe REAL,             -- 調整後 PE (目標價對應 PE)
+                created_at TEXT
+            )
+        ''')
+        conn.commit()
         
         added_count = 0
         for r in records:

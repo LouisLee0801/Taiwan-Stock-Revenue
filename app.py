@@ -1671,6 +1671,26 @@ elif choice == "📈 評等調整追蹤":
             
         # 查詢資料庫
         conn = get_connection()
+        # 防禦性檢查：確保資料表一定存在，避免部署延遲或資料庫檔案不同步導致的 pandas read_sql 報錯
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rating_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT,                    -- 調整日期 (YYYY-MM-DD)
+                stock_code TEXT,              -- 股票代號
+                stock_name TEXT,              -- 股票名稱
+                broker TEXT,                  -- 報告券商/研究機構
+                original_rating TEXT,         -- 原評等
+                new_rating TEXT,              -- 新評等
+                target_price REAL,            -- 目標價
+                reason TEXT,                  -- 調整原因與分析
+                current_pe REAL,              -- 現行 PE
+                adjusted_pe REAL,             -- 調整後 PE (目標價對應 PE)
+                created_at TEXT
+            )
+        ''')
+        conn.commit()
+        
         sql = '''
             SELECT id, date, stock_code, stock_name, broker, original_rating, 
                    new_rating, target_price, current_pe, adjusted_pe, reason
@@ -1772,6 +1792,24 @@ elif choice == "📈 評等調整追蹤":
                 else:
                     conn = get_connection()
                     cursor = conn.cursor()
+                    # 確保資料表存在，避免部署不同步問題
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS rating_adjustments (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            date TEXT,
+                            stock_code TEXT,
+                            stock_name TEXT,
+                            broker TEXT,
+                            original_rating TEXT,
+                            new_rating TEXT,
+                            target_price REAL,
+                            reason TEXT,
+                            current_pe REAL,
+                            adjusted_pe REAL,
+                            created_at TEXT
+                        )
+                    ''')
+                    conn.commit()
                     created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     cursor.execute('''
                         INSERT INTO rating_adjustments (
