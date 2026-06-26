@@ -1443,3 +1443,115 @@ def get_single_stock_chip_analysis(api_key, stock_code, stock_name, db_path=None
         except Exception as fallback_err:
             return f"Gemini 產生報告失敗: {e}，且備用本地分析發生錯誤: {fallback_err}"
 
+
+def scan_broker_ratings(api_key, db_path=None):
+    """
+    使用 Gemini 聯網搜尋近期（今日或最近幾天）台灣股市中，外資、投信等研究機構調整個股評等與目標價的資訊。
+    回傳解析出的評等調整，並寫入 rating_adjustments 資料表中。
+    """
+    model_with_search = get_vertex_model(api_key, enable_search=True)
+    if not model_with_search:
+        return "Gemini API 金鑰未設定或初始化失敗，無法進行評等掃描。"
+        
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    prompt = f"""
+你是一位專業的台股研究分析助理。當前系統時間是 {current_date_str}。
+
+請利用你的 Google 搜尋引擎聯網工具，搜尋近期（特別是接近 {current_date_str} 的這幾天）台灣股市中，各大券商、外資（如大摩、小摩、野村、瑞銀、麥格理、美林等）或本土投信/研究機構「調整個股評等（升評/降評/維持）」與「目標價變更」的相關新聞、研究報告精要與財經網站資料。
+
+請將搜尋到的評等調整資訊彙整，並「嚴格且只以 JSON 陣列格式」輸出。每個物件代表一次評等調整，欄位如下：
+- `date`: 調整日期，格式必須為 "YYYY-MM-DD"（請根據報導推估具體日期，必須在此期間內）。
+- `stock_code`: 4位數字股票代碼，例如 "2330"。如果無法確定，請略過該筆。
+- `stock_name`: 公司名稱，例如 "台積電"。
+- `broker`: 券商或研究機構名稱，例如 "摩根士丹利"、"瑞銀證券"、"統一投顧" 等。
+- `original_rating`: 調整前的評等（如：中立、減碼、無、或買進）。如果未知請填 "未知"。
+- `new_rating`: 調整後的評等（如：買進、優於大盤、中立、減碼等）。
+- `target_price`: 調整後的目標價（數值，例如 1200.0。若沒有具體數值請填 0）。
+- `current_pe`: 現行本益比（數值，例如 24.5。如果報導中沒有提及，請根據最新股價與預估/過往EPS進行合理估計，若真的無法估計則填 0）。
+- `adjusted_pe`: 調整後目標價對應的本益比（數值，即目標價除以預估EPS，例如 30.2。如果報導沒提及，請以目標價合理估計，若真的無法估算則填 0）。
+- `reason`: 調整評等或目標價的具體理由，請簡短摘錄核心要點（例如：新產能開出、CoWoS訂單爆發、AI伺服器拉貨超預期、或是庫存去化慢等），字數在 50-150 字內，以繁體中文撰寫。
+
+請注意：
+1. 僅回傳一個 JSON Array，不要有任何 Markdown 包裹字元（不要 ```json），也不要任何前後贅字。如果真的沒有找到任何評等調整，請回傳空陣列 `[]`。
+2. 確保股票代碼是真實且存在的台股代碼。
+
+回傳格式範例：
+[
+  {{
+    "date": "2026-06-25",
+    "stock_code": "3535",
+    "stock_name": "晶彩科",
+    "broker": "摩根士丹利",
+    "original_rating": "中立",
+    "new_rating": "優於大盤",
+    "target_price": 32.5,
+    "current_pe": 18.2,
+    "adjusted_pe": 23.4,
+    "reason": "受惠於新一代面板檢測設備出貨增加，且特定大客戶拉貨動能強勁。預期本季營收YoY將有結構性暴增，因此將評等調升至優於大盤，目標價升至 32.5 元。"
+  }}
+]
+"""
+    try:
+        response = model_with_search.generate_content(prompt)
+        content = response.text.strip()
+        
+        # 移除可能存在的 Markdown 標記
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        import json
+        try:
+            records = json.loads(content)
+        except Exception as json_err:
+            import re
+            match = re.search(r'\[\s*\{.*\}\s*\]', content, re.DOTALL)
+            if match:
+                records = json.loads(match.group(0))
+            else:
+                raise json_err
+                
+        if not isinstance(records, list):
+            return "Gemini 回傳格式非陣列，無法解析。"
+            
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        
+        added_count = 0
+        for r in records:
+            code = r.get('stock_code')
+            name = r.get('stock_name')
+            broker = r.get('broker')
+            if not code or not name or not broker:
+                continue
+                
+            cursor.execute(
+                "SELECT id FROM rating_adjustments WHERE date = ? AND stock_code = ? AND broker = ?",
+                (r.get('date'), code, broker)
+            )
+            if cursor.fetchone():
+                continue
+                
+            created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute('''
+                INSERT INTO rating_adjustments (
+                    date, stock_code, stock_name, broker, original_rating, 
+                    new_rating, target_price, reason, current_pe, adjusted_pe, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                r.get('date'), code, name, broker, r.get('original_rating', '未知'),
+                r.get('new_rating', '未知'), float(r.get('target_price', 0.0) or 0.0),
+                r.get('reason', ''), float(r.get('current_pe', 0.0) or 0.0),
+                float(r.get('adjusted_pe', 0.0) or 0.0), created_time
+            ))
+            added_count += 1
+            
+        conn.commit()
+        conn.close()
+        return f"✔ AI 聯網掃描完成！本次共新增了 {added_count} 筆評等調整記錄。"
+    except Exception as e:
+        return f"Gemini 評等掃描失敗: {e}"
+

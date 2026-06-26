@@ -498,6 +498,7 @@ with st.sidebar:
         "🔮 潛力轉盈股分析",
         "🎯 籌碼與技術糾結股",
         "🚀 當月異軍突起股",
+        "📈 評等調整追蹤",
         "🤖 Gemini AI 投資顧問",
         "⚙️ 資料管理中心"
     ]
@@ -1648,6 +1649,161 @@ elif choice == "🚀 當月異軍突起股":
                         else:
                             st.markdown(report)
                             st.rerun()
+
+# --- 3.8. 頁面：評等調整追蹤 ---
+elif choice == "📈 評等調整追蹤":
+    st.markdown('<h1 class="gradient-text">📈 外資與投信評等調整追蹤</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="gradient-subtext">追蹤各大外資與投信研究機構對台股個股評等的升降、目標價的調整，以及對應本益比變化的原因解析。</p>', unsafe_allow_html=True)
+    
+    tab_board, tab_manual, tab_ai = st.tabs(["📊 評等調整看板", "✍️ 手動新增評等", "🤖 AI 智慧聯網掃描"])
+    
+    with tab_board:
+        st.markdown("### 🔍 評等變動看板與歷史紀錄")
+        
+        # 篩選條件
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            search_code = st.text_input("搜尋股票代號或名稱", "")
+        with col2:
+            search_broker = st.text_input("搜尋券商/研究機構", "")
+        with col3:
+            date_filter = st.date_input("篩選調整日期", value=None)
+            
+        # 查詢資料庫
+        conn = get_connection()
+        sql = '''
+            SELECT id, date, stock_code, stock_name, broker, original_rating, 
+                   new_rating, target_price, current_pe, adjusted_pe, reason
+            FROM rating_adjustments
+            WHERE 1=1
+        '''
+        params = []
+        if search_code:
+            sql += " AND (stock_code LIKE ? OR stock_name LIKE ?)"
+            params.append(f"%{search_code}%")
+            params.append(f"%{search_code}%")
+        if search_broker:
+            sql += " AND broker LIKE ?"
+            params.append(f"%{search_broker}%")
+        if date_filter:
+            sql += " AND date = ?"
+            params.append(str(date_filter))
+            
+        sql += " ORDER BY date DESC, id DESC"
+        df_ratings = pd.read_sql(sql, conn, params=params)
+        conn.close()
+        
+        if df_ratings.empty:
+            st.info("目前尚無符合條件的評等調整紀錄。您可以在其他分頁手動新增或啟用 AI 掃描！")
+        else:
+            # 複製一份用於美觀顯示
+            df_disp = df_ratings.copy()
+            df_disp = df_disp.rename(columns={
+                'date': '日期',
+                'stock_code': '股票代號',
+                'stock_name': '股票名稱',
+                'broker': '研究機構',
+                'original_rating': '原先評等',
+                'new_rating': '調整後評等',
+                'target_price': '目標價 (TWD)',
+                'current_pe': '現行 PE',
+                'adjusted_pe': '目標價 PE'
+            })
+            
+            # 使用 st.dataframe 呈現表格
+            st.dataframe(
+                df_disp[['日期', '股票代號', '股票名稱', '研究機構', '原先評等', '調整後評等', '目標價 (TWD)', '現行 PE', '目標價 PE']],
+                use_container_width=True
+            )
+            
+            # 展開詳細原因
+            st.write("---")
+            st.markdown("### 💬 調整理由與深度解析")
+            rating_options = [f"{row['date']} | {row['stock_code']} {row['stock_name']} ({row['broker']})" for _, row in df_ratings.iterrows()]
+            selected_idx = st.selectbox("選擇一筆記錄以查看詳細調整理由：", range(len(rating_options)), format_func=lambda x: rating_options[x])
+            
+            if selected_idx is not None:
+                record = df_ratings.iloc[selected_idx]
+                st.markdown(f"#### 🎯 **{record['stock_code']} {record['stock_name']}** — **{record['broker']}** 調整評等點評")
+                col_det1, col_det2 = st.columns(2)
+                with col_det1:
+                    st.write(f"📅 **日期**：{record['date']}")
+                    st.write(f"🏷️ **評等變動**：`{record['original_rating']}` ➔ `{record['new_rating']}`")
+                    st.write(f"🎯 **目標價**：`{record['target_price']} 元`")
+                with col_det2:
+                    st.write(f"📊 **現行本益比 (PE)**：`{record['current_pe']} 倍`")
+                    st.write(f"📈 **調整後(目標價)本益比**：`{record['adjusted_pe']} 倍`")
+                    
+                st.markdown("##### 💡 **調評核心原因與展望**：")
+                st.info(record['reason'] if record['reason'] else "無提供具體理由。")
+                
+                # 顯示該股 K 線與均線圖
+                st.markdown("##### 📈 **即時均線與 52W 高點 K 線對齊**：")
+                fig_rating = draw_k_line_chart_with_52w(record['stock_code'])
+                if fig_rating:
+                    st.plotly_chart(fig_rating, use_container_width=True)
+                    st.caption("註：紅色虛線為 52 週最高價。橘線 5MA、淺藍線 10MA、粉紅線 20MA、綠線 60MA。")
+                    
+    with tab_manual:
+        st.markdown("### ✍️ 手動新增或每日更新個股評等調整")
+        st.write("手動輸入今天或近期調整評等的台股個股資訊：")
+        
+        with st.form("manual_rating_form", clear_on_submit=True):
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                f_date = st.date_input("評等調整日期", datetime.now())
+                f_code = st.text_input("股票代號 (如 2330)", "")
+                f_name = st.text_input("股票名稱 (如 台積電)", "")
+                f_broker = st.text_input("研究機構/券商 (如 摩根大通)", "")
+            with col_f2:
+                f_orig = st.text_input("原先評等 (如 中立)", "")
+                f_new = st.text_input("調整後評等 (如 買進)", "")
+                f_target = st.number_input("目標價 (TWD)", min_value=0.0, value=0.0, step=0.5)
+                f_curr_pe = st.number_input("現行本益比 (PE)", min_value=0.0, value=0.0, step=0.1)
+                f_adj_pe = st.number_input("調整後本益比 (目標價對應 PE)", min_value=0.0, value=0.0, step=0.1)
+                
+            f_reason = st.text_area("評等調整原因與核心邏輯", height=120)
+            
+            submit_btn = st.form_submit_button("➕ 提交並儲存至資料庫")
+            
+            if submit_btn:
+                if not f_code or not f_name or not f_broker:
+                    st.error("❌ 股票代號、公司名稱與研究機構為必填欄位！")
+                else:
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute('''
+                        INSERT INTO rating_adjustments (
+                            date, stock_code, stock_name, broker, original_rating, 
+                            new_rating, target_price, reason, current_pe, adjusted_pe, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        str(f_date), f_code, f_name, f_broker, f_orig or '未知',
+                        f_new or '未知', f_target, f_reason, f_curr_pe, f_adj_pe, created_time
+                    ))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"✔ 成功手動新增 {f_code} {f_name} 的評等變動紀錄！")
+                    st.rerun()
+                    
+    with tab_ai:
+        st.markdown("### 🤖 AI 智慧聯網全自動掃描今日評等")
+        st.write("點擊下方按鈕，AI 將自動聯網（透過 Google Search Grounding）檢索近期台灣股市上有關各大外資與投信最新出爐的評等調整與目標價報告，並自動解析與寫入您的資料庫。")
+        
+        api_key = st.session_state.get('api_key_input')
+        if not api_key:
+            st.warning("⚠️ 請先在側邊欄配置您的 Gemini API Key 以啟用 AI 聯網掃描！")
+        else:
+            if st.button("🚀 啟動 AI 聯網自動更新今日評等調整", key='run_ai_rating_scan'):
+                with st.spinner("AI 正在聯網搜集今日最新外資/投信評等調整報告，並自動提取 PE 與原因，請稍候... (這大約需要 20-30 秒)"):
+                    from gemini_service import scan_broker_ratings
+                    res_msg = scan_broker_ratings(api_key, db_path=None)
+                    if "失敗" in res_msg or "error" in res_msg.lower():
+                        st.error(res_msg)
+                    else:
+                        st.success(res_msg)
+                        st.rerun()
 
 # --- 4. 頁面：Gemini AI 投資顧問 ---
 elif choice == "🤖 Gemini AI 投資顧問":

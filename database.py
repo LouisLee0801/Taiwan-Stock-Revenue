@@ -89,6 +89,24 @@ def init_db(db_path=DEFAULT_DB_PATH):
         )
     ''')
     
+    # 6. 外資與投信評等調整紀錄表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rating_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,                    -- 調整日期 (YYYY-MM-DD)
+            stock_code TEXT,              -- 股票代號
+            stock_name TEXT,              -- 股票名稱
+            broker TEXT,                  -- 報告券商/研究機構
+            original_rating TEXT,         -- 原評等
+            new_rating TEXT,              -- 新評等
+            target_price REAL,            -- 目標價
+            reason TEXT,                  -- 調整原因與分析
+            current_pe REAL,              -- 現行 PE
+            adjusted_pe REAL,             -- 調整後 PE (目標價對應 PE)
+            created_at TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
     print(f"Database initialized at: {db_path}")
