@@ -22,7 +22,7 @@ from crawler import (
 from gemini_service import (
     refine_stock_industries, analyze_industry_outliers,
     analyze_monthly_market_trends, analyze_quarterly_financial_trends, get_gemini_model,
-    analyze_investor_conferences, analyze_turnaround_stocks
+    analyze_investor_conferences, analyze_turnaround_stocks, analyze_etf_rebalancing
 )
 
 # 載入環境變數
@@ -499,6 +499,7 @@ with st.sidebar:
         "🎯 籌碼與技術糾結股",
         "🚀 當月異軍突起股",
         "📈 評等調整追蹤",
+        "📰 ETF 換股新聞",
         "🤖 Gemini AI 投資顧問",
         "⚙️ 資料管理中心"
     ]
@@ -1852,6 +1853,50 @@ elif choice == "📈 評等調整追蹤":
                         st.session_state.rating_scan_success = f"✔ {res_msg} | 執行時間: {current_time_str}"
                         st.session_state.pop('rating_scan_error', None)
                     st.rerun()
+
+# --- 3.8. 頁面：ETF 換股新聞 ---
+elif choice == "📰 ETF 換股新聞":
+    st.markdown('<h1 class="gradient-text">📰 ETF 最新換股新聞與智慧分析</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="gradient-subtext">使用 Gemini AI 聯網查詢台灣主流 ETF（如 0050、0056、00878、00919、00929、00940 等）最近一次的換股時間、成分股變動名單與調整原因深度解析。</p>', unsafe_allow_html=True)
+    
+    current_month = datetime.now().strftime("%Y-%m")
+    
+    # 檢查快取
+    cached_etf_report, report_time = get_gemini_report_details('etf_rebalancing', current_month)
+    report_placeholder = st.empty()
+    
+    if cached_etf_report:
+        with report_placeholder.container():
+            st.info(f"💡 本次報告生成時間: **{report_time}** (每月快取一次，以防重複呼叫 API)")
+            st.markdown(cached_etf_report)
+            
+            # 提供手動重新分析按鈕
+            if st.button("🔄 重新掃描並生成分析報告", key='refresh_etf_btn'):
+                api_key = st.session_state.get('api_key_input')
+                if not api_key:
+                    st.error("請先在側邊欄配置您的 Gemini API Key！")
+                else:
+                    with st.spinner("AI 正在搜尋最新網路公告並編寫分析報告中..."):
+                        new_report = analyze_etf_rebalancing(api_key, db_path=None)
+                        if "失敗" in new_report or "未設定" in new_report:
+                            st.error(new_report)
+                        else:
+                            st.success("報告更新成功！")
+                            st.rerun()
+    else:
+        st.warning("⚠️ 目前資料庫中尚無本月的 ETF 換股分析報告，請點擊下方按鈕進行智慧聯網掃描生成。")
+        if st.button("🔍 啟動 AI 智慧聯網掃描", key='start_etf_btn'):
+            api_key = st.session_state.get('api_key_input')
+            if not api_key:
+                st.error("請先在側邊欄配置您的 Gemini API Key！")
+            else:
+                with st.spinner("AI 正在搜尋最新網路公告並編寫分析報告中..."):
+                    new_report = analyze_etf_rebalancing(api_key, db_path=None)
+                    if "失敗" in new_report or "未設定" in new_report:
+                         st.error(new_report)
+                    else:
+                         st.success("報告生成成功！")
+                         st.rerun()
 
 # --- 4. 頁面：Gemini AI 投資顧問 ---
 elif choice == "🤖 Gemini AI 投資顧問":
