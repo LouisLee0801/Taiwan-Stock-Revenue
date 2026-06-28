@@ -464,63 +464,174 @@ def get_latest_stock_price(stock_code):
             pass
     return None
 
+def _fetch_cb_data_from_tpex(stock_code):
+    """
+    直接從公開資訊觀測站 API 查詢某股票代號的可轉債發行資料。
+    回傳 list of dict，每筆包含 cb_code, cb_name, issue_date, maturity_date,
+    conversion_price, outstanding_amount, secured, issuer 等欄位。
+    """
+    import urllib.request
+    cb_list = []
+    try:
+        # 使用公開資訊觀測站的可轉換公司債基本資料 API
+        url = f"https://mops.twse.com.tw/mops/web/ajax_t187ap15_Q?firstin=1&TYPEK=&year=&stkno={stock_code}&cbno=&step=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = resp.read().decode("utf-8", errors="replace")
+        # 嘗試解析 JSON
+        parsed = json.loads(data)
+        if isinstance(parsed, list):
+            for item in parsed:
+                cb_list.append(item)
+        elif isinstance(parsed, dict) and "aaData" in parsed:
+            for row in parsed["aaData"]:
+                cb_list.append(row)
+    except Exception:
+        pass
+
+    if cb_list:
+        return cb_list
+
+    # 備用：嘗試 TPEx OTC 可轉換公司債 API
+    try:
+        import urllib.parse
+        url2 = f"https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap15_Q?stockNo={stock_code}"
+        req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req2, timeout=8) as resp2:
+            data2 = resp2.read().decode("utf-8", errors="replace")
+        parsed2 = json.loads(data2)
+        if isinstance(parsed2, list):
+            cb_list = parsed2
+    except Exception:
+        pass
+
+    return cb_list
+
+
 def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
     """
-    使用 Gemini (啟用 Google Search Grounding) 重新查詢個股的詳細資訊。
-    包括：個股介紹、最近題材、小作文、法說會資訊、新聞，以及 1) 公開資訊觀測站近一個月的重訊/公告，2) 證交所/櫃買的可轉債(CB)發行細節。
+    個股深度解析：
+    1. 先由程式直接抓取即時股價 (yfinance) 與可轉債資料 (MOPS API)
+    2. 把這些確定性數字作為「已知事實」注入 prompt
+    3. Gemini 只負責做質性分析（題材/新聞/法說/估值），不負責查數字
     """
     model = get_gemini_model(api_key)
     if not model:
         return "Gemini API 金鑰未設定，無法查詢個股詳細資訊。"
-        
+
     from google.generativeai import protos
-    
-    # 建立一個有 Google Search Grounding 的 model 執行個體
+
     model_with_search = genai.GenerativeModel(
         model_name=model.model_name,
         tools=[protos.Tool(google_search=protos.Tool.GoogleSearch())]
     )
-    
+
     current_date_str = datetime.now().strftime("%Y-%m-%d")
-    
+
+    # ── Step 1: 程式直接抓即時股價 ──────────────────────────────────────
+    current_price = None
+    try:
+        import yfinance as yf
+        import pandas as pd
+        for suffix in [".TW", ".TWO"]:
+            try:
+                ticker_symbol = f"{stock_code}{suffix}"
+                df = yf.download(ticker_symbol, period="3d", progress=False, timeout=6)
+                if not df.empty and "Close" in df.columns:
+                    close_col = df["Close"]
+                    # Handle multi-level columns (yfinance sometimes returns DataFrame within Close)
+                    if isinstance(close_col, pd.DataFrame):
+                        close_col = close_col.iloc[:, 0]
+                    series = close_col.dropna()
+                    if not series.empty:
+                        current_price = round(float(series.iloc[-1]), 2)
+                        break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+    price_context = (
+        f"【系統已確認的即時股價】：{stock_code} {stock_name} 目前最新收盤價為 **{current_price} 元**（由 Yahoo Finance 即時取得，請以此為準，勿自行更改）。"
+        if current_price
+        else f"【即時股價查詢失敗】：系統無法取得 {stock_code} {stock_name} 的即時股價，請在報告中寫「股價資料暫時無法取得」。"
+    )
+
+    # ── Step 2: 程式直接抓可轉債資料 (MOPS API) ──────────────────────────
+    cb_data = _fetch_cb_data_from_tpex(stock_code)
+
+    if cb_data:
+        cb_lines = []
+        for cb in cb_data:
+            # MOPS API 欄位名稱可能為中文或英文，嘗試常見欄位
+            cb_no    = cb.get("cb_code") or cb.get("cbno") or cb.get("可轉債代號") or cb.get("債券代號", "N/A")
+            cb_name  = cb.get("cb_name") or cb.get("cbname") or cb.get("可轉債名稱") or cb.get("債券名稱", "N/A")
+            conv_p   = cb.get("conversion_price") or cb.get("convprice") or cb.get("轉換價格") or cb.get("轉換價", "N/A")
+            iss_date = cb.get("issue_date") or cb.get("issuedate") or cb.get("發行日期", "N/A")
+            mat_date = cb.get("maturity_date") or cb.get("maturitydate") or cb.get("到期日期") or cb.get("到期日", "N/A")
+            secured  = cb.get("secured") or cb.get("擔保方式") or cb.get("有無擔保", "N/A")
+            amount   = cb.get("outstanding_amount") or cb.get("發行總額") or cb.get("發行金額", "N/A")
+            cb_lines.append(
+                f"  - 代號/名稱：{cb_no} {cb_name}｜轉換價：{conv_p} 元｜"
+                f"發行日：{iss_date}｜到期日：{mat_date}｜擔保方式：{secured}｜發行總額：{amount}"
+            )
+        cb_context = (
+            f"【系統已確認的可轉債資料（來自公開資訊觀測站 API）】：\n"
+            + "\n".join(cb_lines)
+            + "\n以上為官方 API 直接取得之數字，請照單全收、原文呈現，一個字都不能改，也不能自行推算到期日！"
+        )
+    else:
+        cb_context = (
+            f"【系統 API 查詢結果】：公開資訊觀測站 API 目前查無 {stock_code} {stock_name} 的發行中可轉債紀錄。"
+            f"若你的搜尋結果中有找到確切的可轉債代號與發行資訊（如 35161 亞帝歐一），請仍將其呈現，"
+            f"並在旁邊標註「（來源：網路搜尋）」；若真的查無，請寫「目前無發行中的可轉債」。"
+        )
+
+    # ── Step 3: 組合 prompt，數字已確定，Gemini 只做質性分析 ─────────────
     prompt = f"""
 你是一位專業的台股投資顧問與產業基本面分析師。
-當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
-請針對個股 **{stock_code} {stock_name}**，使用搜尋引擎查詢最新（截至當前時間）的相關資訊，並為我撰寫一份「個股深度解析報告」。
+當前系統時間是：{current_date_str}。
 
-【請務必執行以下幾組關鍵字搜尋以獲取真實資訊】：
-1. 搜尋 "{stock_code} {stock_name} 公開資訊觀測站 重訊" 或 "{stock_code} {stock_name} 重大訊息"，確認近一個月內是否有重要公告或重訊。
-2. 搜尋 "{stock_code} {stock_name} 可轉債" 或 "{stock_code} {stock_name} 轉換公司債"，確認該股是否有流通在外的可轉債 (CB)，若有，請抓取發行細節如債券簡稱（如 35161 亞帝歐一）、轉換價、已轉換比例（或未轉換餘額）、現價、到期日等。
-3. 搜尋 "{stock_code} {stock_name} 最新新聞" 或 "{stock_code} {stock_name} 法說會"。
+以下是系統已透過程式 API 直接取得的「確定性數據」，請直接使用，不需要也不允許重新搜尋或修改這些數字：
 
-【報告架構強制要求】：
-請務必包含以下項目，必須結合你搜尋到的真實具體資訊：
-1. **個股介紹**：簡述該公司的核心業務、主要產品、以及在產業鏈中的角色與市佔率。
-2. **最近題材**：分析該股近期最受市場矚目的題材（例如 AI、半導體先進製程、重電、或是傳統照明/Modules等實際業務題材）。
-3. **小作文與市場傳言**：彙整市場上針對該個股流傳的論壇討論或市場傳言，並給予客觀的評估。
-4. **法說會與重要會議重點**：整理該公司最近一次法說會或法說焦點（營收展望、資本支出、毛利率預測、技術進度）。
-5. **重大訊息與重要公告 (近一個月)**：
-   - 列出近一個月內公開資訊觀測站（MOPS）上發布的重要重大訊息、公告或董事會重要決議（如股利政策、私募、或增資）。若無，請寫「近一個月無重大公告與重訊」。
-6. **可轉債 (CB) 發行狀況與評估**：
-   - 確認該股是否有可轉債（如 35161 亞帝歐一）。
-   - 若有，請列出：可轉債代號/簡稱、轉換價、現價、到期日、發行總額及最新已轉換比例（或未轉換餘額）。
-   - 若該公司目前無發行中的可轉債，請明確寫出「目前無發行中的可轉債」。
-7. **最新新聞與事件**：摘要過去數個月內對公司股價或營運有重大影響的真實媒體報導。
-8. **財務與估值分析 (Forward PE)**：
-   - 估計該公司過去半年的營收、淨利與 EPS 概況，預估其 Forward PE（預估本益比），並點評目前估值水準是否合理。
+{price_context}
 
-⚠️ 【極重要防範與禁止幻覺/編造規定】：
-1. 嚴格禁止胡編亂造：對於所有項目，特別是「最新新聞」、「重大訊息與公告」與「可轉債發行狀況」，你必須只呈現「真實搜尋到」的公開事實與數據！
-2. 絕對不可憑空捏造任何假的產品發布、假的合作合約、假的法說會展望、或假的可轉債發行金額/利率/到期日！例如：如果搜尋到亞帝歐 (3516) 近期沒有推出所謂「智能邊緣AI視覺檢測系統」或「歐洲大型軌道合約」，請「絕對不可」寫入！如果沒有，就老實寫「無近期重大新聞」或「無 AI 相關產品發布」。
-3. 如果搜尋到的資訊極少，請誠實呈現，嚴禁灌水或虛構！
+{cb_context}
 
-請以繁體中文撰寫，字數約 800 - 1500 字，要求內容扎實、細緻、條理分明。使用 Markdown 格式呈現，多使用子標題、列表或對比表格來增強可讀性。
+---
+
+現在請使用 Google Search 搜尋引擎，針對個股 **{stock_code} {stock_name}**，查詢以下「質性資訊」，並撰寫「個股深度解析報告」：
+
+【請搜尋以下項目，只回報搜尋到的真實內容】：
+1. 搜尋「{stock_code} {stock_name} 重大訊息」或「{stock_code} {stock_name} site:mops.twse.com.tw」，取得近一個月的重要公告。
+2. 搜尋「{stock_code} {stock_name} 法說會」或「{stock_code} {stock_name} 營收展望」，取得最新法說內容。
+3. 搜尋「{stock_code} {stock_name} 新聞」，取得近期真實的媒體報導。
+
+【報告架構】：
+1. **個股介紹**：核心業務、主要產品、產業鏈角色。
+2. **最近題材**：近期最受市場關注的題材（請基於搜尋到的真實內容，不可虛構）。
+3. **市場傳言與小作文**：論壇或媒體流傳的傳言，給予客觀評估。
+4. **法說會與重要會議重點**：最近一次法說會的真實摘要。
+5. **重大訊息與公告（近一個月）**：MOPS 上的真實公告（若無，請寫「近一個月無重大公告」）。
+6. **可轉債 (CB) 發行狀況**：請直接使用上方系統提供的 API 數據，不得修改日期、轉換價等數字。
+7. **近期真實新聞**：搜尋到的真實媒體報導摘要（嚴禁虛構！若查無，請寫「近期無重要新聞」）。
+8. **財務與估值分析（Forward PE）**：根據資料庫與公開財報，估計 EPS 與 Forward PE。
+
+⚠️ 最高優先規定：
+- 項目 1（股價）與項目 6（CB 數據）的所有數字已由程式 API 確認，請**原文引用，不得更改**。
+- 項目 7（新聞）若搜尋不到真實內容，請老實寫「查無近期重要新聞」，**嚴禁編造任何假新聞或假事件**。
+
+請以繁體中文撰寫，Markdown 格式，字數約 800–1500 字。
 """
     try:
         response = model_with_search.generate_content(prompt)
         return response.text
     except Exception as e:
         return f"Gemini 查詢個股詳細資訊失敗: {e}"
+
+
+
 
 def predict_turnarounds_with_gemini(api_key, industry_name, stock_financials_json):
     """
