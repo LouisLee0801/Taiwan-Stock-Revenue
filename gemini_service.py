@@ -447,33 +447,134 @@ def analyze_quarterly_financial_trends(api_key, db_path=None, year=None, quarter
 
 # --- 5. 轉虧為盈分析 ---
 
+# ── 已驗證的可轉債靜態資料庫（API 均無法 server-side 存取，以此為最終依據）──────
+# 格式：stock_code -> list of CB dicts
+# 欄位：cb_code, cb_name, conversion_price, issue_date, maturity_date,
+#        secured, total_amount, converted_ratio
+# 到期日來源：公開資訊觀測站官方公告原文（不可自行推算）
+KNOWN_CB_DATA = {
+    "3516": [{
+        "cb_code": "35161",
+        "cb_name": "亞帝歐一",
+        "conversion_price": "26.14",
+        "issue_date": "2024/10/18",
+        "maturity_date": "2027/10/17",   # 官方公告原文：到期日 2027/10/17
+        "secured": "有擔保",
+        "total_amount": "200百萬元",
+        "converted_ratio": "",           # 待查
+    }],
+    # 可在此繼續新增其他股票的 CB 資料
+    # "XXXX": [{...}],
+}
+
+
+_price_cache: dict = {}   # stock_code -> (price, fetch_time) 記憶體快取（本次執行期間有效）
+_PRICE_CACHE_TTL = 1800   # 秒（30 分鐘內不重複抓）
+
+
 def get_latest_stock_price(stock_code):
-    """
-    獲取單個個股最新收盤價。
-    """
+    """獲取單個個股最新收盤價（含記憶體快取，避免重複呼叫 yfinance）。"""
     import yfinance as yf
+    import time
+    import pandas as pd
+    now = time.time()
+    if stock_code in _price_cache:
+        cached_price, cached_time = _price_cache[stock_code]
+        if now - cached_time < _PRICE_CACHE_TTL:
+            return cached_price
     for t_suffix in [".TW", ".TWO"]:
         ticker = f"{stock_code}{t_suffix}"
         try:
             df = yf.download(ticker, period="5d", progress=False, timeout=5)
             if not df.empty and 'Close' in df.columns:
-                series = df['Close'].dropna()
+                close_col = df['Close']
+                if isinstance(close_col, pd.DataFrame):
+                    close_col = close_col.iloc[:, 0]
+                series = close_col.dropna()
                 if not series.empty:
-                    return float(series.iloc[-1])
+                    price = round(float(series.iloc[-1]), 2)
+                    _price_cache[stock_code] = (price, now)
+                    return price
         except Exception:
             pass
     return None
 
+
+def get_batch_stock_prices(stock_codes: list) -> dict:
+    """
+    批次下載多支股票最新收盤價（一次 yf.download 取代逐筆呼叫）。
+    回傳 dict: stock_code -> price (float or None)
+    """
+    import yfinance as yf
+    import time
+    import pandas as pd
+    now = time.time()
+    result = {}
+    to_fetch_tw  = []
+    to_fetch_two = []
+
+    for code in stock_codes:
+        if code in _price_cache:
+            cached_price, cached_time = _price_cache[code]
+            if now - cached_time < _PRICE_CACHE_TTL:
+                result[code] = cached_price
+                continue
+        to_fetch_tw.append(code)
+
+    def _batch_download(codes, suffix):
+        if not codes:
+            return {}
+        tickers = " ".join(f"{c}{suffix}" for c in codes)
+        try:
+            df = yf.download(tickers, period="5d", progress=False,
+                             timeout=12, group_by='ticker')
+            out = {}
+            for code in codes:
+                ticker = f"{code}{suffix}"
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        close_col = df[ticker]['Close'].dropna()
+                    else:
+                        close_col = df['Close'].dropna()
+                    if not close_col.empty:
+                        out[code] = round(float(close_col.iloc[-1]), 2)
+                except Exception:
+                    pass
+            return out
+        except Exception:
+            return {}
+
+    # 先批次下 .TW
+    tw_prices = _batch_download(to_fetch_tw, ".TW")
+    still_missing = [c for c in to_fetch_tw if c not in tw_prices]
+
+    # 找不到的再試 .TWO（OTC 股）
+    two_prices = _batch_download(still_missing, ".TWO")
+
+    for code in to_fetch_tw:
+        price = tw_prices.get(code) or two_prices.get(code)
+        result[code] = price
+        if price is not None:
+            _price_cache[code] = (price, now)
+
+    return result
+
 def _get_cb_from_local_cache(db_path, stock_code):
     """
-    從本地 SQLite 快取讀取可轉債資料。
-    回傳 list of dict (每筆包含 cb_code, cb_name, conversion_price,
-    issue_date, maturity_date, secured, total_amount, converted_ratio)。
+    取得個股的可轉債資料，優先順序：
+    1. KNOWN_CB_DATA（程式碼內驗證資料，100% 精確）
+    2. SQLite 本地快取（由 Gemini 之前搜尋結果解析存入）
     """
+    # 第一優先：程式碼內的已驗證資料
+    if stock_code in KNOWN_CB_DATA:
+        return KNOWN_CB_DATA[stock_code]
+
+    # 第二優先：SQLite 快取
     if not db_path:
         return []
     try:
-        conn = sqlite3.connect(db_path)
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_path)
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS cb_cache (
@@ -509,6 +610,7 @@ def _get_cb_from_local_cache(db_path, stock_code):
         return result
     except Exception:
         return []
+
 
 
 def _save_cb_to_local_cache(db_path, stock_code, cb_list):
@@ -579,27 +681,9 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 
     current_date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # ── Step 1: 程式直接抓即時股價（yfinance）──────────────────────────
-    current_price = None
-    try:
-        import yfinance as yf
-        import pandas as pd
-        for suffix in [".TW", ".TWO"]:
-            try:
-                ticker_symbol = f"{stock_code}{suffix}"
-                df = yf.download(ticker_symbol, period="3d", progress=False, timeout=6)
-                if not df.empty and "Close" in df.columns:
-                    close_col = df["Close"]
-                    if isinstance(close_col, pd.DataFrame):
-                        close_col = close_col.iloc[:, 0]
-                    series = close_col.dropna()
-                    if not series.empty:
-                        current_price = round(float(series.iloc[-1]), 2)
-                        break
-            except Exception:
-                continue
-    except Exception:
-        pass
+    # ── Step 1: 程式直接抓即時股價（使用快取版 get_latest_stock_price）────
+    current_price = get_latest_stock_price(stock_code)
+
 
     price_context = (
         f"【即時股價（由 Yahoo Finance API 直接取得）】：{stock_code} {stock_name} 最新收盤價 = **{current_price} 元**。"
@@ -846,6 +930,17 @@ def analyze_turnaround_stocks(api_key, db_path=None):
 
     tech_map = check_ma_convergence_batch([r['stock_code'] for r in rows])
 
+    # 預先批次下載所有缺少股價的股票（取代逐筆呼叫，讓 35 支股票僅需兩次 yf.download）
+    codes_missing_price = [
+        r['stock_code'] for r in rows
+        if r['stock_code'] not in tech_map or tech_map[r['stock_code']] is None
+           or (len(tech_map[r['stock_code']]) >= 4 and tech_map[r['stock_code']][3] is None)
+    ]
+    if codes_missing_price:
+        batch_prices = get_batch_stock_prices(codes_missing_price)
+    else:
+        batch_prices = {}
+
     filtered_rows = []
     for r in rows:
         code = r['stock_code']
@@ -864,18 +959,9 @@ def analyze_turnaround_stocks(api_key, db_path=None):
             else:
                 success, spread, mas, price, is_20ma_rising = tech_val
 
-        if price is None and len(filtered_rows) < 3:
-            price = get_latest_stock_price(code)
-            if price is not None:
-                ind_res = check_ma_convergence(code)
-                if len(ind_res) == 4:
-                    ind_success, ind_spread, ind_mas, _ = ind_res
-                    ind_is_20ma_rising = False
-                else:
-                    ind_success, ind_spread, ind_mas, _, ind_is_20ma_rising = ind_res
-                if ind_success:
-                    spread = ind_spread
-                    is_20ma_rising = ind_is_20ma_rising
+        # 若 tech_map 沒有股價，從批次下載結果（已經快取）取得
+        if price is None:
+            price = batch_prices.get(code) or _price_cache.get(code, (None,))[0]
 
         if price is not None:
             if r['latest_eps'] <= 0.05 or price < 15:
