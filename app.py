@@ -190,13 +190,31 @@ def get_ma_convergence_table_data(report_text):
     
     rows = []
     for code in valid_codes:
-        # 獲取股票名稱
+        # 獲取股票名稱與最新一季 EPS
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT stock_name FROM monthly_revenue WHERE stock_code = ? LIMIT 1", (code,))
         r = cursor.fetchone()
+        
+        cursor.execute('''
+            SELECT eps, year, quarter 
+            FROM quarterly_financials 
+            WHERE stock_code = ? 
+            ORDER BY year DESC, quarter DESC 
+            LIMIT 1
+        ''', (code,))
+        eps_row = cursor.fetchone()
         conn.close()
+        
         name = r['stock_name'] if r else "未知"
+        
+        eps_str = "N/A"
+        if eps_row:
+            eps_val = eps_row['eps']
+            y_val = eps_row['year']
+            q_val = eps_row['quarter']
+            eps_str = f"{eps_val} 元 ({y_val} Q{q_val})"
+            
         res_val = batch_results.get(code)
         if res_val:
             # 增加防禦性檢查，避免因為快取或版本不一致導致 4 元素與 5 元素元組解包失敗
@@ -219,6 +237,7 @@ def get_ma_convergence_table_data(report_text):
                 rows.append({
                     "股票代號": code,
                     "股票名稱": name,
+                    "最新一季 EPS": eps_str,
                     "即時股價": f"{price} 元",
                     "5MA": f"{mas.get('5MA')} 元",
                     "10MA": f"{mas.get('10MA')} 元",
