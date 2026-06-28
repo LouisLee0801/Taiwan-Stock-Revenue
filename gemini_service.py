@@ -1271,13 +1271,16 @@ def get_single_stock_chip_analysis(api_key, stock_code, stock_name, db_path=None
 def scan_broker_ratings(api_key, db_path=None):
     """
     使用 Gemini 聯網功能自動檢索近期券商/外資/投信對台灣股市個股的最新評等調整報告，
-    並自動解析與寫入資料庫中的 rating_adjustments 資料表。
+    藉由「升評」、「降評」、「調評/目標價變動」三大關鍵字方向進行分次精準查詢，並寫入資料庫。
     """
     model_with_search = get_vertex_model(api_key, enable_search=True)
     if not model_with_search:
         return "Gemini API 金鑰未設定，無法搜集評等調整資訊。"
         
     from datetime import datetime, timedelta
+    import json
+    import re
+    
     today = datetime.now()
     one_month_ago = today - timedelta(days=30)
     current_date_str = today.strftime("%Y-%m-%d")
@@ -1287,150 +1290,138 @@ def scan_broker_ratings(api_key, db_path=None):
     tsmc_price = get_latest_stock_price('2330') or 2340.0
     mediatek_price = get_latest_stock_price('2454') or 3880.0
     
-    prompt = f"""
-你是一位專業的台股研究分析助理。
-今天是 {current_date_str}。請以此時間點為基準，**僅搜集過去一個月內（即 {one_month_ago_str} 至 {current_date_str} 之間）發布的最新券商/外資/投信評等調整報告**。
-
-請利用你的 Google 搜尋引擎聯網工具，以多個精確的關鍵字進行全面搜尋，例如：
-1. "聯發科 評等 2026"、"聯發科 目標價 瑞銀"、"聯發科 6500"、"MediaTek target price 2026"
-2. "台股 外資 評等 調整 2026"、"外資 升評 2026"、"目標價 升評 2026"
-3. "台積電 評等 2026"、"鴻海 評等 2026"
-
-請務必搜集包括聯發科（2454）於 6/25 左右由瑞銀證券調升目標價至 6500 元、摩根士丹利上調目標價至 5588 元等重磅外資與投信評等調整新聞！
-
+    prompts = [
+        # 子查詢 1: 升評關鍵字
+        f"今天是 {current_date_str}。請利用搜尋引擎搜尋過去一個月內（即 {one_month_ago_str} 至 {current_date_str}）台灣股市中，各大研究機構（外資、投信、本土券商）對個股進行「升評」（調升評等、評級調高、買進、優於大盤）的最新新聞與研究報告資料。",
+        # 子查詢 2: 降評關鍵字
+        f"今天是 {current_date_str}。請利用搜尋引擎搜尋過去一個月內（即 {one_month_ago_str} 至 {current_date_str}）台灣股市中，各大研究機構（外資、投信、本土券商）對個股進行「降評」（調降評等、評級調低、減碼、劣於大盤）的最新新聞與研究報告資料。",
+        # 子查詢 3: 調評/目標價變動
+        f"今天是 {current_date_str}。請利用搜尋引擎搜尋過去一個月內（即 {one_month_ago_str} 至 {current_date_str}）台灣股市中，各大研究機構（外資、投信、本土券商）對個股進行「調評」、「調整評等」、「目標價調整」、「目標價上調/下調」的最新新聞與研究報告資料。"
+    ]
+    
+    common_rules = f"""
 【當前市場股價參考】
 - 台積電 (2330) 當前實際股價約為 {tsmc_price} 元
 - 聯發科 (2454) 當前實際股價約為 {mediatek_price} 元
 
-⚠️ 嚴格時間與真實性防範規定（請一併遵守）：
-1. 你的搜尋與整理「只能」包含發布日期在 **{one_month_ago_str} 至 {current_date_str}** 之間的報導。
-2. 請核實目標價必須符合現行 2026 年的市場時空背景。目前台積電最新股價已在 {tsmc_price} 元左右，聯發科也在 {mediatek_price} 元左右。如果您搜到台積電評等目標價為 800 元、1000 元、甚至 1350 元以下，或者聯發科目標價為 800 元、1200 元等，這明顯是 2024 年或更早的過期舊聞（因為當時股價較低），請「絕對不要」納入！
-3. 近期（2026年6月）台積電的外資目標價多數已上調至 3000 元至 3500 元之間。請確保你獲取的目標價是符合當下時空背景的最新數據。
-4. 請務必仔細核對搜尋結果網頁中的發布時間。如果網頁沒有明確標註是 2026 年 5-6 月的發布時間，請絕對不要採信！
-5. **【嚴格強制規定】** 在 JSON 輸出的 `reason`（調整理由）欄位中，你必須「在最開頭」加上該筆報告的『具體發布媒體、日期與報導標題』，格式為：`【發布日期 媒體名稱：新聞標題】`。例如：`【2026/06/24 工商時報：大摩上調台積電評等至優於大盤】...理由摘要`。如果沒有具體媒體與發布日期，請不要納入該筆。
+⚠️ 嚴格規定：
+1. 僅包含發布日期在 **{one_month_ago_str} 至 {current_date_str}** 之間的真實報導。
+2. 評語/調整理由的 `reason` 欄位開頭必須標記：`【發布日期 媒體名稱：新聞標題】`。
+3. 嚴防過期資料：如果搜到台積電目標價 1350 元以下或聯發科目標價 1200 元以下，為過期舊聞，請「絕對不要」納入！
+4. 僅回傳一個 JSON 陣列格式（不要 ```json，不要前後贅字）。如果找不到符合日期與真實性要求的資料，請回傳 `[]`。
 
-請將搜尋到的評等調整資訊彙整，並「嚴格且只以 JSON 陣列格式」輸出。每個物件代表一次評等調整，欄位如下：
-- `date`: 調整日期，格式必須為 "YYYY-MM-DD"（必須在 {one_month_ago_str} 至 {current_date_str} 內，請從報導標題或網頁時間中精確核對，禁止虛構）。
-- `stock_code`: 4位數字股票代碼，例如 "2330"。
-- `stock_name`: 公司名稱，例如 "台積電"。
-- `broker`: 券商或研究機構名稱，例如 "摩根士丹利"、"瑞銀證券"、"統一投顧" 等。
-- `original_rating`: 調整前的評等（如：中立、減碼、無、或買進）。如果未知請填 "未知"。
-- `new_rating`: 調整後的評等（如：買進、優於大盤、中立、減碼等）。
-- `target_price`: 調整後的目標價（數值，例如 1200.0。若沒有具體數值請填 0）。
-- `current_pe`: 現行本益比（數值，例如 24.5。如果報導中沒有提及，請根據最新股價與預估/過往EPS進行合理估計，若真的無法估計則填 0）。
-- `adjusted_pe`: 調整後目標價對應的本益比（數值，即目標價除以預估EPS，例如 30.2。如果報導沒提及，請以目標價合理估計，若真的無法估算則填 0）。
-- `reason`: 必須以 `【發布日期 媒體名稱：新聞標題】` 開頭，後續加上調評原因（如CoWoS拉貨爆發等），字數在 80-180 字內，以繁體中文撰寫。
-
-請注意：
-1. 僅回傳一個 JSON Array，不要有與 Markdown 包裹字元（不要 ```json），也不要任何前後贅字。如果沒有找到符合日期限制的真實數據，請回傳空陣列 `[]`，絕不可胡亂編造！
-2. 確保股票代碼是真實且存在的台股代碼。
-
-回傳格式範例：
-[
-  {{
-    "date": "2026-06-25",
-    "stock_code": "3535",
-    "stock_name": "晶彩科",
-    "broker": "摩根士丹利",
-    "original_rating": "中立",
-    "new_rating": "優於大盤",
-    "target_price": 32.5,
-    "current_pe": 18.2,
-    "adjusted_pe": 23.4,
-    "reason": "【2026/06/25 工商時報：大摩上調晶彩科評等至優於大盤】受惠於新一代面板檢測設備出貨增加，且特定大客戶拉貨動能強勁。預期本季營收YoY將有結構性暴增，因此將評等調升至優於大盤，目標價升至 32.5 元。"
-  }}
-]
+JSON 欄位：
+- `date`: "YYYY-MM-DD"
+- `stock_code`: 4位數字代碼
+- `stock_name`: 公司名稱
+- `broker`: 券商機構名稱
+- `original_rating`: 調整前評等（未知填 "未知"）
+- `new_rating`: 調整後評等
+- `target_price`: 數值（無則填 0）
+- `current_pe`: 數值（無則填 0）
+- `adjusted_pe`: 數值（無則填 0）
+- `reason`: 理由（以 `【發布日期 媒體名稱：新聞標題】` 開頭，繁體中文，80-180字內）
 """
-    try:
-        response = model_with_search.generate_content(prompt)
-        content = response.text.strip()
-        
-        # 移除可能存在的 Markdown 包裹
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        
-        import json
-        records = []
-        if content:
-            try:
-                records = json.loads(content)
-            except Exception as json_err:
-                import re
-                match = re.search(r'\[\s*\{.*\}\s*\]', content, re.DOTALL)
-                if match:
-                    try:
-                        records = json.loads(match.group(0))
-                    except Exception as json_err_inner:
-                        if len(match.group(0).strip()) <= 2:
-                            records = []
-                        else:
-                            print(f"Failed to parse cleaned JSON block: {json_err_inner}. Raw content: {content}")
-                            return f"AI 聯網掃描完成，但模型回傳的資料格式有誤，無法解析。回傳內容前100字：{content[:100]}"
-                else:
-                    content_lower = content.lower()
-                    no_data_keywords = ["沒有", "未找到", "找不到", "無法找到", "無符合", "no rating", "no updates", "no data"]
-                    if any(k in content_lower for k in no_data_keywords) or len(content.strip()) < 50:
-                        records = []
-                    else:
-                        print(f"JSON parsing failed. Raw response: {content}")
-                        return f"AI 聯網掃描完成，但未找到結構化評等調整資料。模型回傳：{content[:150]}..."
-                        
-        conn = get_connection(db_path)
-        cursor = conn.cursor()
-        
-        # 確保資料表已存在
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS rating_adjustments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT,                    -- 調整日期 (YYYY-MM-DD)
-                stock_code TEXT,              -- 股票代碼
-                stock_name TEXT,              -- 股票名稱
-                broker TEXT,                  -- 調整機構/券商
-                original_rating TEXT,         -- 原評等
-                new_rating TEXT,              -- 新評等
-                target_price REAL,            -- 目標價
-                reason TEXT,                  -- 理由與新聞來源
-                current_pe REAL,              -- 現行 PE
-                adjusted_pe REAL,             -- 調整後 PE
-                created_at TEXT
-            )
-        ''')
-        conn.commit()
-        
-        added_count = 0
-        for r in records:
-            code = r.get('stock_code')
-            name = r.get('stock_name')
-            broker = r.get('broker')
-            if not code or not name or not broker:
-                continue
-                
-            cursor.execute(
-                "SELECT id FROM rating_adjustments WHERE date = ? AND stock_code = ? AND broker = ?",
-                (r.get('date'), code, broker)
-            )
-            if cursor.fetchone():
-                continue
-                
-            created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute('''
-                INSERT INTO rating_adjustments (
-                    date, stock_code, stock_name, broker, original_rating, 
-                    new_rating, target_price, reason, current_pe, adjusted_pe, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                r.get('date'), code, name, broker, r.get('original_rating', '未知'),
-                r.get('new_rating', '未知'), float(r.get('target_price', 0.0) or 0.0),
-                r.get('reason', ''), float(r.get('current_pe', 0.0) or 0.0),
-                float(r.get('adjusted_pe', 0.0) or 0.0), created_time
-            ))
-            added_count += 1
+
+    all_records = []
+    
+    for query_prompt in prompts:
+        full_prompt = query_prompt + common_rules
+        try:
+            response = model_with_search.generate_content(full_prompt)
+            content = response.text.strip()
             
-        conn.commit()
-        conn.close()
-        return f"AI 評等掃描完成！新增了 {added_count} 筆評等變動紀錄。"
-    except Exception as e:
-        return f"Gemini 掃描評等失敗: {e}"
+            # 移除 Markdown 包裹
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+            
+            if content:
+                records = []
+                try:
+                    records = json.loads(content)
+                except Exception:
+                    match = re.search(r'\[\s*\{.*\}\s*\]', content, re.DOTALL)
+                    if match:
+                        try:
+                            records = json.loads(match.group(0))
+                        except Exception:
+                            pass
+                
+                if isinstance(records, list):
+                    all_records.extend(records)
+                    
+        except Exception as e:
+            print(f"Error executing sub-query for broker ratings: {e}")
+            
+    # 合併與去重 (根據 date, stock_code, broker)
+    seen = set()
+    deduped_records = []
+    for r in all_records:
+        date_val = r.get('date')
+        code_val = r.get('stock_code')
+        broker_val = r.get('broker')
+        if not date_val or not code_val or not broker_val:
+            continue
+        key = (date_val, code_val, broker_val)
+        if key not in seen:
+            seen.add(key)
+            deduped_records.append(r)
+            
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    # 確保資料表已存在
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rating_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,                    -- 調整日期 (YYYY-MM-DD)
+            stock_code TEXT,              -- 股票代碼
+            stock_name TEXT,              -- 股票名稱
+            broker TEXT,                  -- 調整機構/券商
+            original_rating TEXT,         -- 原評等
+            new_rating TEXT,              -- 新評等
+            target_price REAL,            -- 目標價
+            reason TEXT,                  -- 理由與新聞來源
+            current_pe REAL,              -- 現行 PE
+            adjusted_pe REAL,             -- 調整後 PE
+            created_at TEXT
+        )
+    ''')
+    conn.commit()
+    
+    added_count = 0
+    for r in deduped_records:
+        code = r.get('stock_code')
+        name = r.get('stock_name')
+        broker = r.get('broker')
+        if not code or not name or not broker:
+            continue
+            
+        cursor.execute(
+            "SELECT id FROM rating_adjustments WHERE date = ? AND stock_code = ? AND broker = ?",
+            (r.get('date'), code, broker)
+        )
+        if cursor.fetchone():
+            continue
+            
+        created_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute('''
+            INSERT INTO rating_adjustments (
+                date, stock_code, stock_name, broker, original_rating, 
+                new_rating, target_price, reason, current_pe, adjusted_pe, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            r.get('date'), code, name, broker, r.get('original_rating', '未知'),
+            r.get('new_rating', '未知'), float(r.get('target_price', 0.0) or 0.0),
+            r.get('reason', ''), float(r.get('current_pe', 0.0) or 0.0),
+            float(r.get('adjusted_pe', 0.0) or 0.0), created_time
+        ))
+        added_count += 1
+        
+    conn.commit()
+    conn.close()
+    
+    return f"AI 評等關鍵字聯網掃描完成！新增了 {added_count} 筆最新評等變動紀錄。"
