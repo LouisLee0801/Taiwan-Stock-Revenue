@@ -434,6 +434,51 @@ def get_latest_stock_price(stock_code):
                     return float(series.iloc[-1])
         except Exception:
             pass
+    return None
+
+def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
+    """
+    使用 Gemini (啟用 Google Search Grounding) 重新查詢個股的詳細資訊。
+    包括：個股介紹、最近題材、小作文、法說會資訊、新聞，以及 Forward PE 估值分析。
+    """
+    model = get_gemini_model(api_key)
+    if not model:
+        return "Gemini API 金鑰未設定，無法查詢個股詳細資訊。"
+        
+    from google.generativeai import protos
+    
+    # 建立一個有 Google Search Grounding 的 model 執行個體
+    model_with_search = genai.GenerativeModel(
+        model_name=model.model_name,
+        tools=[protos.Tool(google_search=protos.Tool.GoogleSearch())]
+    )
+    
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    prompt = f"""
+你是一位專業的台股投資顧問與產業分析師。
+當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
+請針對個股 **{stock_code} {stock_name}**，使用搜尋引擎查詢最新（截至當前時間）的相關資訊，並為我撰寫一份「個股深度解析報告」。
+
+請務必包含以下項目，不要套用千篇一律的模板，必須結合你搜尋到的真實具體資訊：
+1. **個股介紹**：簡述該公司的核心業務、主要產品、以及在產業鏈中的角色與市佔率。
+2. **最近題材**：分析該股近期最受市場矚目的題材（例如 AI、半導體先進製程、光通訊、重電等最新技術或訂單趨勢）。
+3. **小作文與市場傳言**：彙整市場上針對該個股流傳的「小作文」（如特定產品打入供應鏈、產能利用率暴增、即將被收購或與大廠合作的耳語與論壇討論），並給予客觀的澄清或評估。
+4. **法說會與重要會議重點**：整理該公司最近一次法說會或法說焦點（包含營收展望、資本支出、毛利率預測、技術節點進度）。
+5. **最新新聞與事件**：摘要過去數個月內對公司股價或營運有重大影響的媒體報導或重訊。
+6. **財務與估值分析 (Forward PE)**：
+   - 估計該公司過去半年（截至當前時間）的營收、毛利、淨利與 EPS 概況。
+   - 根據市場目前的最新共識與展望，預估其 Forward PE（預估本益比），並點評目前估值水準是否合理、偏高或偏低。
+
+請以繁體中文撰寫，字數約 800 - 1500 字，要求內容扎實、細緻、條理分明。使用 Markdown 格式呈現，多使用子標題、列表或對比表格來增強可讀性。
+注意：請以當前時間視角來回答，搜尋最新資訊，避免提及「記憶體復甦已確立」等已在2024-2025年完成的陳舊分析（除非當前有最新數據），專注於當前的實際狀況。
+"""
+    try:
+        response = model_with_search.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Gemini 查詢個股詳細資訊失敗: {e}"
+
 def predict_turnarounds_with_gemini(api_key, industry_name, stock_financials_json):
     """
     同業營收與估值比較頁面：使用 Gemini 快速評估一組虧損/減虧股中，哪些個股在營收與YoY改善下有較高的轉盈潛力。
