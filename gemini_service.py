@@ -8,6 +8,31 @@ from database import (
     get_connection, save_gemini_industry, save_gemini_report, get_gemini_report
 )
 
+# --- 全域多方驗證與高信心度輸出攔截器 (Monkey-patching generate_content) ---
+_original_generate_content = genai.GenerativeModel.generate_content
+
+def _patched_generate_content(self, contents, **kwargs):
+    verification_suffix = """
+\\n
+【⚠️ 數據真實性與多方驗證極嚴格規定（99% 把握度）】
+1. **多方來源交叉驗證**：對於你搜集到的所有新聞事件、重大訊息、評等調整、可轉債發行數據等，你必須在搜尋結果中進行「多方交叉核對」。如果只有單一極度模糊或可疑的網頁提及，或缺乏主流財經媒體（如：經濟日報、工商時報、MoneyDJ、公開資訊觀測站、櫃買中心等）的證實，請絕對不要納入！
+2. **99% 把握度原則**：只有在你從搜尋引擎獲取的資料中，有 99% 的把握度確認其為真實、準確且發生於指定日期區間的事實後，才能將其回傳給我。任何存在疑慮、語意不清、或無法確定真偽的傳言與數據，寧可完全忽略不提，也絕對不能冒險回傳！
+3. **拒絕編造與幻覺**：絕對禁止任何形式的編造或填充（例如編造假的產品名稱、假的公司合作、假的財務展望數據）。對於數據庫或搜尋中未提及的資訊，請直接回答「未有公開數據」或「無發行/無此訊息」，老實回答是唯一被允許的行為！
+"""
+    if isinstance(contents, str):
+        contents = contents + verification_suffix
+    elif isinstance(contents, list):
+        if contents and isinstance(contents[-1], str):
+            contents[-1] = contents[-1] + verification_suffix
+        elif contents and hasattr(contents[-1], 'text'):
+            try:
+                contents[-1].text = contents[-1].text + verification_suffix
+            except Exception:
+                pass
+    return _original_generate_content(self, contents, **kwargs)
+
+genai.GenerativeModel.generate_content = _patched_generate_content
+
 def write_gemini_debug(msg):
     try:
         log_path = r"C:\Users\a0919\.gemini\antigravity\scratch\tw-stock-fundamental-analyzer\gemini_debug.log"
@@ -439,7 +464,7 @@ def get_latest_stock_price(stock_code):
 def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
     """
     使用 Gemini (啟用 Google Search Grounding) 重新查詢個股的詳細資訊。
-    包括：個股介紹、最近題材、小作文、法說會資訊、新聞，以及 Forward PE 估值分析。
+    包括：個股介紹、最近題材、小作文、法說會資訊、新聞，以及 1) 公開資訊觀測站近一個月的重訊/公告，2) 證交所/櫃買的可轉債(CB)發行細節。
     """
     model = get_gemini_model(api_key)
     if not model:
@@ -456,22 +481,37 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
     current_date_str = datetime.now().strftime("%Y-%m-%d")
     
     prompt = f"""
-你是一位專業的台股投資顧問與產業分析師。
+你是一位專業的台股投資顧問與產業基本面分析師。
 當前系統時間是：{current_date_str}。在分析與展望時，請以當前時間為基準。
 請針對個股 **{stock_code} {stock_name}**，使用搜尋引擎查詢最新（截至當前時間）的相關資訊，並為我撰寫一份「個股深度解析報告」。
 
-請務必包含以下項目，不要套用千篇一律的模板，必須結合你搜尋到的真實具體資訊：
+【請務必執行以下幾組關鍵字搜尋以獲取真實資訊】：
+1. 搜尋 "{stock_code} {stock_name} 公開資訊觀測站 重訊" 或 "{stock_code} {stock_name} 重大訊息"，確認近一個月內是否有重要公告或重訊。
+2. 搜尋 "{stock_code} {stock_name} 可轉債" 或 "{stock_code} {stock_name} 轉換公司債"，確認該股是否有流通在外的可轉債 (CB)，若有，請抓取發行細節如債券簡稱（如 35161 亞帝歐一）、轉換價、已轉換比例（或未轉換餘額）、現價、到期日等。
+3. 搜尋 "{stock_code} {stock_name} 最新新聞" 或 "{stock_code} {stock_name} 法說會"。
+
+【報告架構強制要求】：
+請務必包含以下項目，必須結合你搜尋到的真實具體資訊：
 1. **個股介紹**：簡述該公司的核心業務、主要產品、以及在產業鏈中的角色與市佔率。
-2. **最近題材**：分析該股近期最受市場矚目的題材（例如 AI、半導體先進製程、光通訊、重電等最新技術或訂單趨勢）。
-3. **小作文與市場傳言**：彙整市場上針對該個股流傳的「小作文」（如特定產品打入供應鏈、產能利用率暴增、即將被收購或與大廠合作的耳語與論壇討論），並給予客觀的澄清或評估。
-4. **法說會與重要會議重點**：整理該公司最近一次法說會或法說焦點（包含營收展望、資本支出、毛利率預測、技術節點進度）。
-5. **最新新聞與事件**：摘要過去數個月內對公司股價或營運有重大影響的媒體報導或重訊。
-6. **財務與估值分析 (Forward PE)**：
-   - 估計該公司過去半年（截至當前時間）的營收、毛利、淨利與 EPS 概況。
-   - 根據市場目前的最新共識與展望，預估其 Forward PE（預估本益比），並點評目前估值水準是否合理、偏高或偏低。
+2. **最近題材**：分析該股近期最受市場矚目的題材（例如 AI、半導體先進製程、重電、或是傳統照明/Modules等實際業務題材）。
+3. **小作文與市場傳言**：彙整市場上針對該個股流傳的論壇討論或市場傳言，並給予客觀的評估。
+4. **法說會與重要會議重點**：整理該公司最近一次法說會或法說焦點（營收展望、資本支出、毛利率預測、技術進度）。
+5. **重大訊息與重要公告 (近一個月)**：
+   - 列出近一個月內公開資訊觀測站（MOPS）上發布的重要重大訊息、公告或董事會重要決議（如股利政策、私募、或增資）。若無，請寫「近一個月無重大公告與重訊」。
+6. **可轉債 (CB) 發行狀況與評估**：
+   - 確認該股是否有可轉債（如 35161 亞帝歐一）。
+   - 若有，請列出：可轉債代號/簡稱、轉換價、現價、到期日、發行總額及最新已轉換比例（或未轉換餘額）。
+   - 若該公司目前無發行中的可轉債，請明確寫出「目前無發行中的可轉債」。
+7. **最新新聞與事件**：摘要過去數個月內對公司股價或營運有重大影響的真實媒體報導。
+8. **財務與估值分析 (Forward PE)**：
+   - 估計該公司過去半年的營收、淨利與 EPS 概況，預估其 Forward PE（預估本益比），並點評目前估值水準是否合理。
+
+⚠️ 【極重要防範與禁止幻覺/編造規定】：
+1. 嚴格禁止胡編亂造：對於所有項目，特別是「最新新聞」、「重大訊息與公告」與「可轉債發行狀況」，你必須只呈現「真實搜尋到」的公開事實與數據！
+2. 絕對不可憑空捏造任何假的產品發布、假的合作合約、假的法說會展望、或假的可轉債發行金額/利率/到期日！例如：如果搜尋到亞帝歐 (3516) 近期沒有推出所謂「智能邊緣AI視覺檢測系統」或「歐洲大型軌道合約」，請「絕對不可」寫入！如果沒有，就老實寫「無近期重大新聞」或「無 AI 相關產品發布」。
+3. 如果搜尋到的資訊極少，請誠實呈現，嚴禁灌水或虛構！
 
 請以繁體中文撰寫，字數約 800 - 1500 字，要求內容扎實、細緻、條理分明。使用 Markdown 格式呈現，多使用子標題、列表或對比表格來增強可讀性。
-注意：請以當前時間視角來回答，搜尋最新資訊，避免提及「記憶體復甦已確立」等已在2024-2025年完成的陳舊分析（除非當前有最新數據），專注於當前的實際狀況。
 """
     try:
         response = model_with_search.generate_content(prompt)
