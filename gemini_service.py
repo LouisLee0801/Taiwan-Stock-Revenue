@@ -434,7 +434,50 @@ def get_latest_stock_price(stock_code):
                     return float(series.iloc[-1])
         except Exception:
             pass
-    return None
+def predict_turnarounds_with_gemini(api_key, industry_name, stock_financials_json):
+    """
+    同業營收與估值比較頁面：使用 Gemini 快速評估一組虧損/減虧股中，哪些個股在營收與YoY改善下有較高的轉盈潛力。
+    """
+    model = get_vertex_model(api_key)
+    if not model:
+        return []
+
+    current_date_str = datetime.now().strftime("%Y-%m-%d")
+
+    prompt = f"""
+你是一位專業的台股基本面分析師。
+今天系統時間是：{current_date_str}。
+針對目前屬於 **{industry_name}** 產業中，以下這批最新一季報 EPS 為負值（虧損）或減虧中，但最新月度營收 YoY 成長的個股數據：
+
+請逐一評估每檔股票在營收成長動能與虧損收斂趨勢下，是否有較高的機率在下一個月或下一季度實現轉虧為盈。
+
+判斷條件與原則：
+1. 若該股最新一季 EPS 已接近 0 元（如 -0.05 至 0.0 元）且月營收 YoY 顯著成長，則轉盈潛力高。
+2. 若月營收 YoY 持續走高且毛利結構改善，則轉盈速度快。
+
+請回傳一個 JSON 陣列格式，包含被你評定為「有顯著轉虧為盈潛力（或高度 Highlight）」的個股，格式如下，且**請直接回傳 JSON，不要包裹 Markdown 語法（不要 ```json，不要前後贅字）**：
+1. "code": 股票代碼（字串）
+2. "reason": AI 評估理由（以繁體中文撰寫，字數約 15-20 字，說明其轉盈依據，如營收動能強、EPS已近兩平）
+
+待評估的個股 JSON 數據如下：
+{stock_financials_json}
+"""
+    try:
+        response = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        import json
+        content = response.text.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        return json.loads(content)
+    except Exception as e:
+        print(f"Error predicting turnarounds: {e}")
+        return []
 
 def analyze_turnaround_stocks(api_key, db_path=None):
     """
