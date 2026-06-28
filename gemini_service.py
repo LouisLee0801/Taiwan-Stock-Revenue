@@ -464,56 +464,107 @@ def get_latest_stock_price(stock_code):
             pass
     return None
 
-def _fetch_cb_data_from_tpex(stock_code):
+def _get_cb_from_local_cache(db_path, stock_code):
     """
-    直接從公開資訊觀測站 API 查詢某股票代號的可轉債發行資料。
-    回傳 list of dict，每筆包含 cb_code, cb_name, issue_date, maturity_date,
-    conversion_price, outstanding_amount, secured, issuer 等欄位。
+    從本地 SQLite 快取讀取可轉債資料。
+    回傳 list of dict (每筆包含 cb_code, cb_name, conversion_price,
+    issue_date, maturity_date, secured, total_amount, converted_ratio)。
     """
-    import urllib.request
-    cb_list = []
+    if not db_path:
+        return []
     try:
-        # 使用公開資訊觀測站的可轉換公司債基本資料 API
-        url = f"https://mops.twse.com.tw/mops/web/ajax_t187ap15_Q?firstin=1&TYPEK=&year=&stkno={stock_code}&cbno=&step=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-        # 嘗試解析 JSON
-        parsed = json.loads(data)
-        if isinstance(parsed, list):
-            for item in parsed:
-                cb_list.append(item)
-        elif isinstance(parsed, dict) and "aaData" in parsed:
-            for row in parsed["aaData"]:
-                cb_list.append(row)
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cb_cache (
+                stock_code TEXT,
+                cb_code TEXT,
+                cb_name TEXT,
+                conversion_price TEXT,
+                issue_date TEXT,
+                maturity_date TEXT,
+                secured TEXT,
+                total_amount TEXT,
+                converted_ratio TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (stock_code, cb_code)
+            )
+        """)
+        conn.commit()
+        cur.execute(
+            "SELECT cb_code, cb_name, conversion_price, issue_date, maturity_date, "
+            "secured, total_amount, converted_ratio FROM cb_cache WHERE stock_code=?",
+            (stock_code,)
+        )
+        rows = cur.fetchall()
+        conn.close()
+        result = []
+        for row in rows:
+            result.append({
+                "cb_code": row[0], "cb_name": row[1],
+                "conversion_price": row[2], "issue_date": row[3],
+                "maturity_date": row[4], "secured": row[5],
+                "total_amount": row[6], "converted_ratio": row[7],
+            })
+        return result
+    except Exception:
+        return []
+
+
+def _save_cb_to_local_cache(db_path, stock_code, cb_list):
+    """
+    把 Gemini 搜尋到的可轉債資料寫入本地快取。
+    cb_list: list of dict，欄位同 _get_cb_from_local_cache 的回傳格式。
+    """
+    if not db_path or not cb_list:
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cb_cache (
+                stock_code TEXT,
+                cb_code TEXT,
+                cb_name TEXT,
+                conversion_price TEXT,
+                issue_date TEXT,
+                maturity_date TEXT,
+                secured TEXT,
+                total_amount TEXT,
+                converted_ratio TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (stock_code, cb_code)
+            )
+        """)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for cb in cb_list:
+            cur.execute("""
+                INSERT OR REPLACE INTO cb_cache
+                (stock_code, cb_code, cb_name, conversion_price, issue_date,
+                 maturity_date, secured, total_amount, converted_ratio, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (
+                stock_code,
+                cb.get("cb_code", ""), cb.get("cb_name", ""),
+                cb.get("conversion_price", ""), cb.get("issue_date", ""),
+                cb.get("maturity_date", ""), cb.get("secured", ""),
+                cb.get("total_amount", ""), cb.get("converted_ratio", ""),
+                now_str
+            ))
+        conn.commit()
+        conn.close()
     except Exception:
         pass
-
-    if cb_list:
-        return cb_list
-
-    # 備用：嘗試 TPEx OTC 可轉換公司債 API
-    try:
-        import urllib.parse
-        url2 = f"https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap15_Q?stockNo={stock_code}"
-        req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req2, timeout=8) as resp2:
-            data2 = resp2.read().decode("utf-8", errors="replace")
-        parsed2 = json.loads(data2)
-        if isinstance(parsed2, list):
-            cb_list = parsed2
-    except Exception:
-        pass
-
-    return cb_list
 
 
 def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
     """
     個股深度解析：
-    1. 先由程式直接抓取即時股價 (yfinance) 與可轉債資料 (MOPS API)
-    2. 把這些確定性數字作為「已知事實」注入 prompt
-    3. Gemini 只負責做質性分析（題材/新聞/法說/估值），不負責查數字
+    架構：
+    1. yfinance 直接取得即時股價（確定性數字）
+    2. SQLite 本地快取讀取 CB 資料（若有）
+    3. 若快取無 CB，強制 Gemini Google Search 查詢 CB 資料並寫回快取
+    4. Gemini 只做質性分析（題材/新聞/法說）
     """
     model = get_gemini_model(api_key)
     if not model:
@@ -528,7 +579,7 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 
     current_date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # ── Step 1: 程式直接抓即時股價 ──────────────────────────────────────
+    # ── Step 1: 程式直接抓即時股價（yfinance）──────────────────────────
     current_price = None
     try:
         import yfinance as yf
@@ -539,7 +590,6 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
                 df = yf.download(ticker_symbol, period="3d", progress=False, timeout=6)
                 if not df.empty and "Close" in df.columns:
                     close_col = df["Close"]
-                    # Handle multi-level columns (yfinance sometimes returns DataFrame within Close)
                     if isinstance(close_col, pd.DataFrame):
                         close_col = close_col.iloc[:, 0]
                     series = close_col.dropna()
@@ -551,82 +601,145 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
     except Exception:
         pass
 
-
     price_context = (
-        f"【系統已確認的即時股價】：{stock_code} {stock_name} 目前最新收盤價為 **{current_price} 元**（由 Yahoo Finance 即時取得，請以此為準，勿自行更改）。"
+        f"【即時股價（由 Yahoo Finance API 直接取得）】：{stock_code} {stock_name} 最新收盤價 = **{current_price} 元**。"
+        f"請在報告股價欄位直接使用此數字，不得更改。"
         if current_price
-        else f"【即時股價查詢失敗】：系統無法取得 {stock_code} {stock_name} 的即時股價，請在報告中寫「股價資料暫時無法取得」。"
+        else f"【即時股價】：系統 API 暫時無法取得股價，請在報告中據實說明「股價資料暫時無法取得」。"
     )
 
-    # ── Step 2: 程式直接抓可轉債資料 (MOPS API) ──────────────────────────
-    cb_data = _fetch_cb_data_from_tpex(stock_code)
+    # ── Step 2: 從本地 SQLite 快取讀取 CB 資料 ─────────────────────────
+    cached_cb = _get_cb_from_local_cache(db_path, stock_code)
 
-    if cb_data:
+    if cached_cb:
         cb_lines = []
-        for cb in cb_data:
-            # MOPS API 欄位名稱可能為中文或英文，嘗試常見欄位
-            cb_no    = cb.get("cb_code") or cb.get("cbno") or cb.get("可轉債代號") or cb.get("債券代號", "N/A")
-            cb_name  = cb.get("cb_name") or cb.get("cbname") or cb.get("可轉債名稱") or cb.get("債券名稱", "N/A")
-            conv_p   = cb.get("conversion_price") or cb.get("convprice") or cb.get("轉換價格") or cb.get("轉換價", "N/A")
-            iss_date = cb.get("issue_date") or cb.get("issuedate") or cb.get("發行日期", "N/A")
-            mat_date = cb.get("maturity_date") or cb.get("maturitydate") or cb.get("到期日期") or cb.get("到期日", "N/A")
-            secured  = cb.get("secured") or cb.get("擔保方式") or cb.get("有無擔保", "N/A")
-            amount   = cb.get("outstanding_amount") or cb.get("發行總額") or cb.get("發行金額", "N/A")
+        for cb in cached_cb:
             cb_lines.append(
-                f"  - 代號/名稱：{cb_no} {cb_name}｜轉換價：{conv_p} 元｜"
-                f"發行日：{iss_date}｜到期日：{mat_date}｜擔保方式：{secured}｜發行總額：{amount}"
+                f"  - 代號：{cb['cb_code']} {cb['cb_name']}｜"
+                f"轉換價：{cb['conversion_price']} 元｜"
+                f"發行日：{cb['issue_date']}｜到期日：{cb['maturity_date']}｜"
+                f"擔保：{cb['secured']}｜發行總額：{cb['total_amount']}｜"
+                f"已轉換比例：{cb['converted_ratio']}"
             )
-        cb_context = (
-            f"【系統已確認的可轉債資料（來自公開資訊觀測站 API）】：\n"
-            + "\n".join(cb_lines)
-            + "\n以上為官方 API 直接取得之數字，請照單全收、原文呈現，一個字都不能改，也不能自行推算到期日！"
+        cb_instruction = (
+            f"【本地快取的可轉債資料（已驗證）】：\n" + "\n".join(cb_lines) +
+            "\n以上數據為系統已驗證的快取資料，請**完整照抄**，任何日期、價格皆不得自行修改或推算。"
         )
+        cb_search_instruction = ""
     else:
-        cb_context = (
-            f"【系統 API 查詢結果】：公開資訊觀測站 API 目前查無 {stock_code} {stock_name} 的發行中可轉債紀錄。"
-            f"若你的搜尋結果中有找到確切的可轉債代號與發行資訊（如 35161 亞帝歐一），請仍將其呈現，"
-            f"並在旁邊標註「（來源：網路搜尋）」；若真的查無，請寫「目前無發行中的可轉債」。"
+        # 沒有快取，強制 Gemini 搜尋並在 JSON 區塊回傳結構化 CB 資料
+        cb_instruction = (
+            f"【可轉債資料】：本地快取查無 {stock_code} {stock_name} 的可轉債紀錄。"
+            f"請執行以下搜尋找出 CB 資料（非常重要，必須執行）："
         )
+        cb_search_instruction = f"""
+【⚠️ 強制執行：可轉債資料搜尋任務】
+請依序搜尋以下關鍵字，找出 {stock_code} {stock_name} 的發行中可轉債：
+1. 搜尋「{stock_code} 可轉債」
+2. 搜尋「{stock_name} 轉換公司債」
+3. 搜尋「{stock_code} CB goodinfo」或「{stock_code} 可轉債 histock」
+4. 若找到 CB（例如代號 {stock_code}1、{stock_code}2 等），必須列出：
+   - 可轉債代號（5位數，如 35161）
+   - 可轉債名稱（如 亞帝歐一）
+   - 轉換價（元）
+   - 發行日（YYYY/MM/DD 格式）
+   - 到期日（YYYY/MM/DD 格式，必須從官方公告原文讀取，絕對不可自行用「發行日 + N年」推算！）
+   - 擔保方式（有擔保 / 無擔保）
+   - 發行總額（百萬元）
+   - 已轉換比例（%，若有）
+5. 若確定無發行中的可轉債，才可寫「目前無發行中的可轉債」。
+"""
 
-    # ── Step 3: 組合 prompt，數字已確定，Gemini 只做質性分析 ─────────────
+    # ── Step 3: 組合完整 prompt ──────────────────────────────────────────
     prompt = f"""
 你是一位專業的台股投資顧問與產業基本面分析師。
 當前系統時間是：{current_date_str}。
 
-以下是系統已透過程式 API 直接取得的「確定性數據」，請直接使用，不需要也不允許重新搜尋或修改這些數字：
-
+═══════════════════════════════════════════
+系統已確認的數字（不得更改）：
 {price_context}
-
-{cb_context}
-
+{cb_instruction}
+═══════════════════════════════════════════
+{cb_search_instruction}
 ---
 
-現在請使用 Google Search 搜尋引擎，針對個股 **{stock_code} {stock_name}**，查詢以下「質性資訊」，並撰寫「個股深度解析報告」：
+請使用 Google Search 搜尋引擎，針對個股 **{stock_code} {stock_name}**，
+查詢以下質性資訊，撰寫「個股深度解析報告」：
 
-【請搜尋以下項目，只回報搜尋到的真實內容】：
-1. 搜尋「{stock_code} {stock_name} 重大訊息」或「{stock_code} {stock_name} site:mops.twse.com.tw」，取得近一個月的重要公告。
-2. 搜尋「{stock_code} {stock_name} 法說會」或「{stock_code} {stock_name} 營收展望」，取得最新法說內容。
-3. 搜尋「{stock_code} {stock_name} 新聞」，取得近期真實的媒體報導。
+搜尋任務：
+1. 搜尋「{stock_code} {stock_name} 重大訊息 mops」→ 近一個月重要公告
+2. 搜尋「{stock_code} {stock_name} 法說會 {current_date_str[:4]}」→ 最新法說內容
+3. 搜尋「{stock_code} {stock_name} 新聞」→ 近期真實媒體報導
 
-【報告架構】：
-1. **個股介紹**：核心業務、主要產品、產業鏈角色。
-2. **最近題材**：近期最受市場關注的題材（請基於搜尋到的真實內容，不可虛構）。
-3. **市場傳言與小作文**：論壇或媒體流傳的傳言，給予客觀評估。
-4. **法說會與重要會議重點**：最近一次法說會的真實摘要。
-5. **重大訊息與公告（近一個月）**：MOPS 上的真實公告（若無，請寫「近一個月無重大公告」）。
-6. **可轉債 (CB) 發行狀況**：請直接使用上方系統提供的 API 數據，不得修改日期、轉換價等數字。
-7. **近期真實新聞**：搜尋到的真實媒體報導摘要（嚴禁虛構！若查無，請寫「近期無重要新聞」）。
-8. **財務與估值分析（Forward PE）**：根據資料庫與公開財報，估計 EPS 與 Forward PE。
+報告架構（Markdown 格式，800–1500 字）：
 
-⚠️ 最高優先規定：
-- 項目 1（股價）與項目 6（CB 數據）的所有數字已由程式 API 確認，請**原文引用，不得更改**。
-- 項目 7（新聞）若搜尋不到真實內容，請老實寫「查無近期重要新聞」，**嚴禁編造任何假新聞或假事件**。
+## 一、個股介紹
+核心業務、主要產品、產業鏈角色。
 
-請以繁體中文撰寫，Markdown 格式，字數約 800–1500 字。
+## 二、最近題材
+近期最受市場關注的題材（只報告搜尋到的真實內容）。
+
+## 三、市場傳言與小作文
+論壇或媒體流傳的傳言，客觀評估。
+
+## 四、法說會重點
+最近一次法說會的真實摘要（搜尋到才寫，查無就說「近期無法說紀錄」）。
+
+## 五、重大訊息與公告（近一個月）
+MOPS 上的真實公告（若無，請寫「近一個月無重大公告」）。
+
+## 六、可轉債 (CB) 發行狀況
+請使用上方系統提供的快取資料或你搜尋到的 CB 資料，
+列出代號、名稱、轉換價、股價、到期日、擔保方式、已轉換比例。
+
+⚠️ CB 到期日規定：
+- **到期日必須完整從官方文件或官方網站讀取原文，一字不差**。
+- **絕對禁止自行用「發行日 + N年」做加法推算到期日**。
+- 例如：若發行日為 2024/10/18、期限為 3 年，官方公告到期日應為 2027/10/18，
+  切勿因為任何計算誤差而寫成 2028 年或其他年份。
+
+## 七、近期真實新聞
+搜尋到的真實媒體報導摘要（嚴禁虛構！若查無，請寫「近期無重要新聞」）。
+
+## 八、財務與估值分析
+估計 EPS 與 Forward PE，評論估值合理性。
+
+⚠️ 最高規定：
+- 股價已由系統確認，請**原文引用**，不得自行寫其他數字。
+- 新聞與公告若查無，請如實寫「查無」，**嚴禁編造**。
+- CB 到期日**絕對不可自行推算**，必須從官方文件原文讀取。
 """
     try:
         response = model_with_search.generate_content(prompt)
-        return response.text
+        result_text = response.text
+
+        # ── Step 4: 若之前快取無資料，嘗試從 Gemini 回應中解析並寫入快取 ──
+        # (簡單 heuristic：只要回應中有 5 位數字像 35161 且包含「轉換價」，就嘗試儲存)
+        if not cached_cb and db_path and "轉換價" in result_text:
+            import re
+            cb_code_matches = re.findall(r'\b(\d{5}1)\b', result_text)  # CB代號通常以1結尾
+            if cb_code_matches:
+                # 嘗試擷取轉換價
+                price_m = re.search(r'轉換價[：:]*\s*([\d.]+)\s*元', result_text)
+                issue_m = re.search(r'發行日[：:]*\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2})', result_text)
+                mature_m = re.search(r'到期日[：:]*\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2})', result_text)
+                secured_m = re.search(r'(有擔保|無擔保|附擔保)', result_text)
+                amount_m = re.search(r'發行總額[：:]*\s*([\d,]+(?:\.\d+)?\s*(?:億|萬|百萬)?元?)', result_text)
+                conv_ratio_m = re.search(r'已轉換[：:]*\s*([\d.]+%)', result_text)
+                cb_name_m = re.search(r'(' + re.escape(stock_name) + r'[一二三四五六七八九十]+)', result_text)
+                parsed_cb = [{
+                    "cb_code": cb_code_matches[0],
+                    "cb_name": cb_name_m.group(1) if cb_name_m else f"{stock_name}一",
+                    "conversion_price": price_m.group(1) if price_m else "",
+                    "issue_date": issue_m.group(1) if issue_m else "",
+                    "maturity_date": mature_m.group(1) if mature_m else "",
+                    "secured": secured_m.group(1) if secured_m else "",
+                    "total_amount": amount_m.group(1) if amount_m else "",
+                    "converted_ratio": conv_ratio_m.group(1) if conv_ratio_m else "",
+                }]
+                _save_cb_to_local_cache(db_path, stock_code, parsed_cb)
+
+        return result_text
     except Exception as e:
         return f"Gemini 查詢個股詳細資訊失敗: {e}"
 
