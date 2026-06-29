@@ -453,19 +453,32 @@ def analyze_quarterly_financial_trends(api_key, db_path=None, year=None, quarter
 #        secured, total_amount, converted_ratio
 # 到期日來源：公開資訊觀測站官方公告原文（不可自行推算）
 KNOWN_CB_DATA = {
+    # 格式：stock_code -> list of CB dicts
+    # 到期日來源：公開資訊觀測站官方公告原文（不可自行推算）
     "3516": [{
         "cb_code": "35161",
         "cb_name": "亞帝歐一",
         "conversion_price": "26.14",
         "issue_date": "2024/10/18",
-        "maturity_date": "2027/10/17",   # 官方公告原文：到期日 2027/10/17
+        "maturity_date": "2027/10/17",
         "secured": "有擔保",
-        "total_amount": "200百萬元",
-        "converted_ratio": "",           # 待查
+        "total_amount": "2億元",
+        "converted_ratio": "",
     }],
-    # 可在此繼續新增其他股票的 CB 資料
+    "3037": [{
+        "cb_code": "30371",
+        "cb_name": "欣興一",
+        "conversion_price": "163.8",   # 2026/07/12 起調整後轉換價
+        "issue_date": "2025/11/03",
+        "maturity_date": "2030/11/03",
+        "secured": "無擔保",
+        "total_amount": "40億元",
+        "converted_ratio": "",
+    }],
+    # 其他預先知道的 CB 可在此新增：
     # "XXXX": [{...}],
 }
+
 
 
 _price_cache: dict = {}   # stock_code -> (price, fetch_time) 記憶體快取（本次執行期間有效）
@@ -613,10 +626,11 @@ def _get_cb_from_local_cache(db_path, stock_code):
 
 
 
+
 def _save_cb_to_local_cache(db_path, stock_code, cb_list):
     """
-    把 Gemini 搜尋到的可轉債資料寫入本地快取。
-    cb_list: list of dict，欄位同 _get_cb_from_local_cache 的回傳格式。
+    把 CB 資料寫入本地 SQLite 快取。
+    cb_list: list of dict
     """
     if not db_path or not cb_list:
         return
@@ -657,6 +671,153 @@ def _save_cb_to_local_cache(db_path, stock_code, cb_list):
         conn.close()
     except Exception:
         pass
+
+
+def fetch_cb_data_with_gemini(api_key, stock_code, stock_name, db_path=None):
+    """
+    專門用於查詢可轉債資料的快速 Gemini 函式。
+    流程：
+    1. 先查 KNOWN_CB_DATA（硬編碼，絕對正確）
+    2. 再查 SQLite 快取（30 天內有效）
+    3. 以上都查不到才呼叫 Gemini Search，結果存入 SQLite
+    回傳 list of CB dict，空 list 表示此股確定無發行中可轉債。
+    """
+    import re
+
+    # 第一優先：KNOWN_CB_DATA
+    if stock_code in KNOWN_CB_DATA:
+        return KNOWN_CB_DATA[stock_code]
+
+    # 第二優先：SQLite 快取（30 天內有效）
+    if db_path:
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cb_cache (
+                    stock_code TEXT, cb_code TEXT, cb_name TEXT,
+                    conversion_price TEXT, issue_date TEXT, maturity_date TEXT,
+                    secured TEXT, total_amount TEXT, converted_ratio TEXT,
+                    updated_at TEXT, PRIMARY KEY (stock_code, cb_code)
+                )
+            """)
+            conn.commit()
+            cur.execute(
+                "SELECT cb_code, cb_name, conversion_price, issue_date, maturity_date, "
+                "secured, total_amount, converted_ratio, updated_at "
+                "FROM cb_cache WHERE stock_code=?", (stock_code,)
+            )
+            rows = cur.fetchall()
+            conn.close()
+            if rows:
+                # 檢查新鮮度（30 天內有效）
+                try:
+                    from datetime import timedelta
+                    updated = datetime.strptime(rows[0][8], "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() - updated < timedelta(days=30):
+                        return [{
+                            "cb_code": r[0], "cb_name": r[1],
+                            "conversion_price": r[2], "issue_date": r[3],
+                            "maturity_date": r[4], "secured": r[5],
+                            "total_amount": r[6], "converted_ratio": r[7],
+                        } for r in rows]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # 第三優先：Gemini Search 專用查詢
+    model = get_gemini_model(api_key)
+    if not model:
+        return []
+
+    try:
+        from google.generativeai import protos as _protos
+        model_search = genai.GenerativeModel(
+            model_name=model.model_name,
+            tools=[_protos.Tool(google_search=_protos.Tool.GoogleSearch())]
+        )
+    except Exception:
+        return []
+
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    prompt = f"""今天日期：{current_date}。
+請直接使用 Google Search 搜尋「{stock_code} {stock_name} 可轉債」及「{stock_code} {stock_name} CB」。
+
+我需要查詢 {stock_code} {stock_name} 目前所有發行中的可轉換公司債。
+
+請從搜尋結果中找出每筆可轉債的：
+- 5位數債券代號（例 30371）
+- 債券名稱（例 欣興一）
+- 轉換價（元）
+- 發行日（YYYY/MM/DD）
+- 到期日（YYYY/MM/DD，必須從官方公告原文讀取，絕對不可自行用發行日加年推算！）
+- 擔保方式（有擔保 / 無擔保）
+- 發行總額（億元）
+- 已轉換比例（%）
+
+請將找到的每筆可轉債分別用以下 JSON 格式完整輸出（若無可轉債則輸出空 array [])：
+```json
+[
+  {{
+    "cb_code": "XXXXX",
+    "cb_name": "債券名稱",
+    "conversion_price": "XXX.X",
+    "issue_date": "YYYY/MM/DD",
+    "maturity_date": "YYYY/MM/DD",
+    "secured": "有擔保或無擔保",
+    "total_amount": "XX億元",
+    "converted_ratio": "XX%"
+  }}
+]
+```
+如果確定無發行中的可轉債，輸出：```json\n[]\n```
+程式將直接解析 JSON，請確保格式正確。
+"""
+    try:
+        resp = model_search.generate_content(prompt)
+        text = resp.text if resp.text else ""
+
+        # 解析 JSON 區塊
+        json_match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'(\[\s*\{.*?\}\s*\])', text, re.DOTALL)
+
+        if json_match:
+            import json as _json
+            cb_list = _json.loads(json_match.group(1))
+            if isinstance(cb_list, list) and len(cb_list) > 0:
+                # 驗證必要欄位
+                valid = []
+                for cb in cb_list:
+                    if cb.get("cb_code") and cb.get("maturity_date"):
+                        valid.append({
+                            "cb_code": str(cb.get("cb_code", "")).strip(),
+                            "cb_name": str(cb.get("cb_name", "")).strip(),
+                            "conversion_price": str(cb.get("conversion_price", "")).strip(),
+                            "issue_date": str(cb.get("issue_date", "")).strip(),
+                            "maturity_date": str(cb.get("maturity_date", "")).strip(),
+                            "secured": str(cb.get("secured", "")).strip(),
+                            "total_amount": str(cb.get("total_amount", "")).strip(),
+                            "converted_ratio": str(cb.get("converted_ratio", "")).strip(),
+                        })
+                if valid:
+                    _save_cb_to_local_cache(db_path, stock_code, valid)
+                    return valid
+            # 若 JSON 為空陣列，代表確定無 CB
+            if isinstance(cb_list, list) and len(cb_list) == 0:
+                # 儲存「確定無 CB」的標記，避免每次都重複查
+                _save_cb_to_local_cache(db_path, stock_code, [{
+                    "cb_code": "NONE", "cb_name": "確定無發行中可轉債",
+                    "conversion_price": "", "issue_date": "",
+                    "maturity_date": "", "secured": "",
+                    "total_amount": "", "converted_ratio": "",
+                }])
+                return []
+    except Exception:
+        pass
+
+    return []
 
 
 def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
