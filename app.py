@@ -45,6 +45,7 @@ if 'active_dialog_stock' not in st.session_state:
 
 # --- 個股深度透視與 K 線繪製函數 ---
 
+@st.cache_data(ttl=300)
 def get_yfinance_data(stock_code):
     import yfinance as yf
     ticker = f"{stock_code}.TW"
@@ -53,7 +54,9 @@ def get_yfinance_data(stock_code):
         ticker = f"{stock_code}.TWO"
         df = yf.download(ticker, period="6mo", progress=False, timeout=8)
     if not df.empty:
-        df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
+        # 處理 yfinance 多層欄位（multi-level columns）
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
     return df, ticker
 
 def draw_k_line_chart(stock_code):
@@ -289,46 +292,145 @@ def style_positive_red_negative_green(val):
 @st.dialog("個股深度透視與基本面大解析", width="large", on_dismiss=clear_active_dialog_stock)
 def show_stock_detail_dialog(stock_code, stock_name):
     st.markdown(f"## 🔍 {stock_code} {stock_name}")
-    
+
     api_key = st.session_state.get('api_key_input')
+
+    # ── 區塊1：程式直接取得確定性數字，顯示在頂端（不依賴 AI）──────────
+    from gemini_service import get_latest_stock_price, KNOWN_CB_DATA
+    from database import DEFAULT_DB_PATH
+
+    db_path = DEFAULT_DB_PATH
+
+    # 即時股價（yfinance，含記憶體快取）
+    with st.spinner("取得即時股價..."):
+        live_price = get_latest_stock_price(stock_code)
+
+    # 可轉債：KNOWN_CB_DATA → SQLite 快取 → Gemini Search（三層優先查詢）
+    from gemini_service import fetch_cb_data_with_gemini
+    with st.spinner("查詢可轉債資料..."):
+        cb_list_raw = fetch_cb_data_with_gemini(api_key, stock_code, stock_name, db_path=db_path)
+    # 過濾掉「確定無 CB」的佔位標記
+    cb_list = [cb for cb in cb_list_raw if cb.get("cb_code", "") != "NONE"]
+
+
+    # 顯示確認數據區塊
+    col_p, col_cb = st.columns([1, 2])
+    with col_p:
+        if live_price:
+            st.metric(label="📊 即時收盤價（Yahoo Finance）", value=f"NT$ {live_price:.2f}")
+        else:
+            st.warning("📊 即時股價：暫時無法取得")
+
+    with col_cb:
+        if cb_list:
+            for cb in cb_list:
+                st.info(
+                    f"**可轉債：{cb.get('cb_code','')} {cb.get('cb_name','')}**\n\n"
+                    f"轉換價 **{cb.get('conversion_price','')} 元** ｜ "
+                    f"發行日 {cb.get('issue_date','')} ｜ "
+                    f"到期日 **{cb.get('maturity_date','')}** ｜ "
+                    f"{cb.get('secured','')} ｜ 發行總額 {cb.get('total_amount','')}"
+                )
+        else:
+            st.caption("🔍 可轉債：自動查詢無結果")
+
+        # ── 手動新增/修正可轉債資料（永久寫入 SQLite）──────────────────
+        with st.expander("✏️ 手動新增／修正可轉債資料（若上方資料缺漏或錯誤）"):
+            st.caption("填寫後按「儲存」，資料將永久存入資料庫，下次自動顯示。")
+            with st.form(key=f"cb_manual_form_{stock_code}"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    m_cb_code = st.text_input("可轉債代號（5碼）", placeholder="如 54391")
+                    m_cb_name = st.text_input("可轉債名稱", placeholder="如 高技一")
+                    m_conv_price = st.text_input("轉換價（元）", placeholder="如 300.0")
+                    m_secured = st.selectbox("擔保方式", ["無擔保", "有擔保"])
+                with col2:
+                    m_issue_date = st.text_input("發行日（YYYY/MM/DD）", placeholder="如 2025/09/09")
+                    m_maturity_date = st.text_input("到期日（YYYY/MM/DD）", placeholder="如 2030/09/09")
+                    m_total_amount = st.text_input("發行總額", placeholder="如 5億元")
+                    m_conv_ratio = st.text_input("已轉換比例（%）", placeholder="如 12.5%，不知可留空")
+
+                submitted = st.form_submit_button("💾 儲存可轉債資料")
+                if submitted:
+                    if not m_cb_code or not m_maturity_date:
+                        st.error("可轉債代號和到期日為必填欄位！")
+                    else:
+                        from gemini_service import _save_cb_to_local_cache
+                        new_cb = [{
+                            "cb_code": m_cb_code.strip(),
+                            "cb_name": m_cb_name.strip(),
+                            "conversion_price": m_conv_price.strip(),
+                            "issue_date": m_issue_date.strip(),
+                            "maturity_date": m_maturity_date.strip(),
+                            "secured": m_secured,
+                            "total_amount": m_total_amount.strip(),
+                            "converted_ratio": m_conv_ratio.strip(),
+                        }]
+                        _save_cb_to_local_cache(db_path, stock_code, new_cb)
+                        st.success(f"✔ {m_cb_code} {m_cb_name} 已儲存！請關閉並重新開啟此個股查看更新。")
+
+    st.divider()
+
+
+    # ── 區塊2：AI 深度解析報告（含快取邏輯）──────────────────────────
     tab_ai, tab_tech, tab_fin = st.tabs(["🔮 Gemini AI 聯網深度解析", "📈 技術分析 (日 K 線)", "📊 歷年財務數據"])
-    
+
     with tab_ai:
-        # 先從資料庫獲取快取
-        cached_report = get_gemini_report('stock_details', stock_code)
+        cached_report, cached_at = get_gemini_report_details('stock_details', stock_code, db_path=db_path)
+
+        # 判斷快取是否仍然有效（24 小時內）
+        cache_valid = False
+        if cached_report and cached_at:
+            try:
+                from datetime import datetime, timedelta
+                updated_dt = datetime.strptime(cached_at, '%Y-%m-%d %H:%M:%S')
+                age_hours = (datetime.now() - updated_dt).total_seconds() / 3600
+                cache_valid = age_hours < 24
+                age_str = f"{int(age_hours)}小時{int((age_hours%1)*60)}分前"
+            except Exception:
+                cache_valid = bool(cached_report)
+                age_str = "未知"
         
         report_placeholder = st.empty()
-        
-        if cached_report:
+
+        if cache_valid:
             report_placeholder.markdown(cached_report)
+            st.caption(f"⏱️ 此報告產生於 {age_str}（快取有效期 24 小時）")
             st.write("---")
-            if st.button("🔄 重新分析並更新 (即時更新)", key=f"re_analyze_{stock_code}"):
+            if st.button("🔄 強制重新分析（即時更新）", key=f"re_analyze_{stock_code}"):
                 if not api_key:
                     st.error("請先在側邊欄配置您的 Gemini API Key！")
                 else:
-                    with st.spinner("Gemini 正在搜尋最新資訊並編寫報告..."):
+                    with st.spinner("Gemini 正在搜尋最新資訊並編寫報告，約需 20-30 秒..."):
                         from gemini_service import get_stock_details_from_gemini
-                        report = get_stock_details_from_gemini(api_key, stock_code, stock_name)
-                        if "失敗" not in report and "未設定" not in report and "error" not in report.lower():
-                            save_gemini_report('stock_details', stock_code, report)
+                        report = get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=db_path)
+                        if report and "失敗" not in report and "未設定" not in report:
+                            save_gemini_report('stock_details', stock_code, report, db_path=db_path)
                             report_placeholder.markdown(report)
                             st.success("✔ 報告已成功更新！")
                         else:
-                            st.error(handle_gemini_error(report))
+                            st.error(f"Gemini 分析失敗：{report}")
         else:
+            # 快取不存在或已過期，自動觸發
+            if cached_report:
+                # 顯示舊快取讓使用者不要空等，同時自動刷新
+                report_placeholder.markdown(cached_report)
+                st.warning(f"⚠️ 此報告已超過 24 小時（產生於 {age_str}），正在自動更新...")
+
             if not api_key:
-                st.warning("⚠️ 此個股目前無快取報告。請在側邊欄配置您的 Gemini API Key 以啟用聯網 AI 即時深度解析！")
+                st.warning("⚠️ 請在側邊欄配置您的 Gemini API Key 以啟用聯網 AI 即時深度解析！")
             else:
-                with st.spinner("Gemini 正在搜尋最新法說、小作文、題材、新聞並編寫報告，請稍候... (這大約需要 15-20 秒)"):
+                with st.spinner("Gemini 正在搜尋最新法說、題材、新聞並編寫報告，約需 20-30 秒..."):
                     from gemini_service import get_stock_details_from_gemini
-                    report = get_stock_details_from_gemini(api_key, stock_code, stock_name)
-                    if "失敗" not in report and "未設定" not in report and "error" not in report.lower():
-                        save_gemini_report('stock_details', stock_code, report)
+                    report = get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=db_path)
+                    if report and "失敗" not in report and "未設定" not in report:
+                        save_gemini_report('stock_details', stock_code, report, db_path=db_path)
                         report_placeholder.markdown(report)
                         st.success("✔ 報告分析完成！")
                     else:
-                        st.error(handle_gemini_error(report))
-            
+                        st.error(f"Gemini 分析失敗：{report}")
+
+
     with tab_tech:
         with st.spinner("正在加載 K 線數據..."):
             fig = draw_k_line_chart(stock_code)

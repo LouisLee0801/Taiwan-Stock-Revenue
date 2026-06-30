@@ -468,14 +468,24 @@ KNOWN_CB_DATA = {
     "3037": [{
         "cb_code": "30371",
         "cb_name": "欣興一",
-        "conversion_price": "163.8",   # 2026/07/12 起調整後轉換價
+        "conversion_price": "163.8",
         "issue_date": "2025/11/03",
         "maturity_date": "2030/11/03",
         "secured": "無擔保",
         "total_amount": "40億元",
         "converted_ratio": "",
     }],
-    # 其他預先知道的 CB 可在此新增：
+    "5439": [{
+        "cb_code": "54391",
+        "cb_name": "高技一",
+        "conversion_price": "300.0",
+        "issue_date": "2025/09/09",
+        "maturity_date": "2030/09/09",
+        "secured": "無擔保",
+        "total_amount": "",
+        "converted_ratio": "",
+    }],
+    # 其他已知 CB 可於此新增：
     # "XXXX": [{...}],
 }
 
@@ -778,16 +788,20 @@ def fetch_cb_data_with_gemini(api_key, stock_code, stock_name, db_path=None):
         resp = model_search.generate_content(prompt)
         text = resp.text if resp.text else ""
 
-        # 解析 JSON 區塊
+        # 解析 JSON 區塊（多種格式兼容）
         json_match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL)
         if not json_match:
+            # 嘗試直接找 JSON 陣列
             json_match = re.search(r'(\[\s*\{.*?\}\s*\])', text, re.DOTALL)
 
         if json_match:
             import json as _json
-            cb_list = _json.loads(json_match.group(1))
+            try:
+                cb_list = _json.loads(json_match.group(1))
+            except Exception:
+                cb_list = None
+
             if isinstance(cb_list, list) and len(cb_list) > 0:
-                # 驗證必要欄位
                 valid = []
                 for cb in cb_list:
                     if cb.get("cb_code") and cb.get("maturity_date"):
@@ -804,20 +818,17 @@ def fetch_cb_data_with_gemini(api_key, stock_code, stock_name, db_path=None):
                 if valid:
                     _save_cb_to_local_cache(db_path, stock_code, valid)
                     return valid
-            # 若 JSON 為空陣列，代表確定無 CB
+
+            # ⚠️ 若 JSON 為空陣列 []，代表 Gemini 確認無 CB
+            # 但「不快取 NONE」—— 因為 Gemini 可能搜尋不完整，讓使用者有機會手動新增
             if isinstance(cb_list, list) and len(cb_list) == 0:
-                # 儲存「確定無 CB」的標記，避免每次都重複查
-                _save_cb_to_local_cache(db_path, stock_code, [{
-                    "cb_code": "NONE", "cb_name": "確定無發行中可轉債",
-                    "conversion_price": "", "issue_date": "",
-                    "maturity_date": "", "secured": "",
-                    "total_amount": "", "converted_ratio": "",
-                }])
-                return []
+                return []  # 不寫入 SQLite，讓下次可重試或手動新增
+
     except Exception:
         pass
 
     return []
+
 
 
 def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None):
