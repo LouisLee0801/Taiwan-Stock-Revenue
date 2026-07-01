@@ -930,74 +930,58 @@ def get_stock_details_from_gemini(api_key, stock_code, stock_name, db_path=None)
 報告架構（Markdown 格式，800–1500 字）：
 
 ## 一、個股介紹
-核心業務、主要產品、產業鏈角色。
+核心業務、主要產品、產業鏈角色（基於已知事實，不得虛構）。
 
 ## 二、最近題材
-近期最受市場關注的題材（只報告搜尋到的真實內容）。
+近期最受市場關注的題材（只報告搜尋到的真實內容，查不到就寫「近期查無特定題材」）。
 
 ## 三、市場傳言與小作文
-論壇或媒體流傳的傳言，客觀評估。
+論壇或媒體流傳的傳言，客觀評估。查不到就寫「目前查無市場傳言」。
 
 ## 四、法說會重點
 最近一次法說會的真實摘要（搜尋到才寫，查無就說「近期無法說紀錄」）。
 
 ## 五、重大訊息與公告（近一個月）
-MOPS 上的真實公告（若無，請寫「近一個月無重大公告」）。
+【嚴格規定】：
+- 請搜尋「{stock_code} {stock_name} 重大訊息」和「{stock_code} site:mops.twse.com.tw」
+- 僅列出搜尋結果中**明確出現**的公告，必須標注：公告日期、公告標題
+- **絕對禁止**：捏造公告內容、推測可能有哪些公告、填充與其他公司相關的公告
+- 若搜尋結果中無任何具體公告，請直接寫：「搜尋結果中查無近一個月具體重大公告」
+- 寧可查無，也絕不捏造
 
 ## 六、可轉債 (CB) 發行狀況
-請使用上方系統提供的快取資料或你搜尋到的 CB 資料，
-列出代號、名稱、轉換價、股價、到期日、擔保方式、已轉換比例。
+— 若系統步驟1、2已提供確認的 CB 資料，請**完整照抄**。
+— 若系統提示「查無 CB」，請寫「目前無發行中的可轉債」，不得自行搜尋或修改。
 
-⚠️ CB 到期日規定：
-- **到期日必須完整從官方文件或官方網站讀取原文，一字不差**。
-- **絕對禁止自行用「發行日 + N年」做加法推算到期日**。
-- 例如：若發行日為 2024/10/18、期限為 3 年，官方公告到期日應為 2027/10/18，
-  切勿因為任何計算誤差而寫成 2028 年或其他年份。
-
-## 七、近期真實新聞
-搜尋到的真實媒體報導摘要（嚴禁虛構！若查無，請寫「近期無重要新聞」）。
+## 七、近期真實新聞（近一個月）
+【嚴格規定】：
+- 請搜尋「{stock_code} {stock_name} 新聞 {current_date_str[:7]}」
+- 每則新聞必須標注：**發布日期**、**媒體名稱**、新聞標題
+- 若無法確認日期或媒體來源，該則不得列入
+- **絕對禁止**：捏造新聞、把其他公司的新聞張冠李戴、填充舊聞
+- 若查無符合條件的新聞，請寫：「近一個月查無具體新聞報導」
 
 ## 八、財務與估值分析
 估計 EPS 與 Forward PE，評論估值合理性。
 
-⚠️ 最高規定：
-- 股價已由系統確認，請**原文引用**，不得自行寫其他數字。
-- 新聞與公告若查無，請如實寫「查無」，**嚴禁編造**。
-- CB 到期日**絕對不可自行推算**，必須從官方文件原文讀取。
+⚠️ **以下行為視為嚴重違規，絕對禁止**：
+- 建立不存在的公告、新聞、合作案、品牌、事件
+- 對不確定的資訊加具體細節使其看起來真實
+- 轉換季、日期或金額（如把「月」換成「年」）
+- 把其他公司的資訊套用在此股票上
+「查無」永遠比「編造」更正確、更安全。
 """
     try:
         response = model_with_search.generate_content(prompt)
         result_text = response.text
 
-        # ── Step 4: 若之前快取無資料，嘗試從 Gemini 回應中解析並寫入快取 ──
-        # (簡單 heuristic：只要回應中有 5 位數字像 35161 且包含「轉換價」，就嘗試儲存)
-        if not cached_cb and db_path and "轉換價" in result_text:
-            import re
-            cb_code_matches = re.findall(r'\b(\d{5}1)\b', result_text)  # CB代號通常以1結尾
-            if cb_code_matches:
-                # 嘗試擷取轉換價
-                price_m = re.search(r'轉換價[：:]*\s*([\d.]+)\s*元', result_text)
-                issue_m = re.search(r'發行日[：:]*\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2})', result_text)
-                mature_m = re.search(r'到期日[：:]*\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2})', result_text)
-                secured_m = re.search(r'(有擔保|無擔保|附擔保)', result_text)
-                amount_m = re.search(r'發行總額[：:]*\s*([\d,]+(?:\.\d+)?\s*(?:億|萬|百萬)?元?)', result_text)
-                conv_ratio_m = re.search(r'已轉換[：:]*\s*([\d.]+%)', result_text)
-                cb_name_m = re.search(r'(' + re.escape(stock_name) + r'[一二三四五六七八九十]+)', result_text)
-                parsed_cb = [{
-                    "cb_code": cb_code_matches[0],
-                    "cb_name": cb_name_m.group(1) if cb_name_m else f"{stock_name}一",
-                    "conversion_price": price_m.group(1) if price_m else "",
-                    "issue_date": issue_m.group(1) if issue_m else "",
-                    "maturity_date": mature_m.group(1) if mature_m else "",
-                    "secured": secured_m.group(1) if secured_m else "",
-                    "total_amount": amount_m.group(1) if amount_m else "",
-                    "converted_ratio": conv_ratio_m.group(1) if conv_ratio_m else "",
-                }]
-                _save_cb_to_local_cache(db_path, stock_code, parsed_cb)
-
+        # ⚠️ 注意：此處不再嘗試從 AI 回應文字 regex 解析 CB 資料寫入 SQLite。
+        # 原因：regex 抓取不可靠，會把 AI 幻覺資料存入資料庫造成永久錯誤。
+        # CB 資料來源：KNOWN_CB_DATA（硬編碼）或 fetch_cb_data_with_gemini（結構化 JSON）。
         return result_text
     except Exception as e:
         return f"Gemini 查詢個股詳細資訊失敗: {e}"
+
 
 
 
@@ -1904,12 +1888,20 @@ def scan_broker_ratings(api_key, db_path=None):
     mediatek_price = get_latest_stock_price('2454') or 3880.0
     
     prompts = [
-        # 子查詢 1: 升評 / 調升 / 調高 關鍵字
-        f"今天是 {current_date_str}。請利用搜尋引擎搜尋台灣股市中，各大研究機構（外資、投信、本土券商）對個股進行「升評」、「調升」、「調高」、「評級調高」、「調升評等」、「調升目標價」、「買進」的最新新聞與研究報告資料。",
+        # 子查詢 1: 升評 / 調升 / 調高 關鍵字（中文，含 site: 操作符）
+        (f"今天是 {current_date_str}。請用 Google Search 搜尋以下關鍵字，找出近一個月內台灣股市券商/外資對個股發出的升評或目標價上調報告："
+         f"「升評 台股 {current_date_str[:7]}」、「調升 台股 外資 {current_date_str[:7]}」、「調高目標價 台股」、「評等調升 site:anue.com.tw」、「調升評等 site:moneydj.com」"),
         # 子查詢 2: 降評 / 調降 / 調低 關鍵字
-        f"今天是 {current_date_str}。請利用搜尋引擎搜尋台灣股市中，各大研究機構（外資、投信、本土券商）對個股進行「降評」、「調降」、「調低」、「評級調低」、「調降評等」、「調降目標價」、「賣出」、「減碼」的最新新聞與研究報告資料。",
-        # 子查詢 3: 調評 / 目標價變動 關鍵字
-        f"今天是 {current_date_str}。請利用搜尋引擎搜尋台灣股市中，各大研究機構（外資、投信、本土券商）對個股進行「調評」、「調整評等」、「目標價調整」、「目標價上調/下調」的最新新聞與研究報告資料。"
+        (f"今天是 {current_date_str}。請用 Google Search 搜尋以下關鍵字，找出近一個月內台灣股市券商/外資對個股發出的降評或目標價下調報告："
+         f"「降評 台股 {current_date_str[:7]}」、「調降 台股 外資 {current_date_str[:7]}」、「調低目標價 台股」、「評等調降 site:anue.com.tw」、「調降評等 site:moneydj.com」"),
+        # 子查詢 3: 調評 / 目標價調整 關鍵字
+        (f"今天是 {current_date_str}。請用 Google Search 搜尋以下關鍵字，找出近一個月內台灣股市券商/外資對個股進行評等或目標價調整的報告："
+         f"「調評 台股 {current_date_str[:7]}」、「調整評等 台股」、「目標價調升 site:anue.com.tw」、「目標價下調 site:anue.com.tw」、「評等調整 site:moneydj.com」"),
+        # 子查詢 4: 英文關鍵字，抓取外資英文報告
+        (f"Today is {current_date_str}. Please search Google for recent (within past 30 days) Taiwan stock rating changes by foreign brokerages: "
+         f"\"Taiwan stock upgrade {current_date_str[:7]}\", \"Taiwan stock downgrade {current_date_str[:7]}\", "
+         f"\"Taiwan equity rating upgrade\", \"TWSE rating change\", \"TPEx rating change\". "
+         f"Find broker research reports upgrading or downgrading Taiwan-listed stocks."),
     ]
     
     common_rules = f"""

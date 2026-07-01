@@ -334,6 +334,20 @@ def show_stock_detail_dialog(stock_code, stock_name):
         else:
             st.caption("🔍 可轉債：自動查詢無結果")
 
+        # ── 清除錯誤 CB 快取按鈕 ─────────────────────────────────────────
+        if cb_list:
+            if st.button("🗑️ 清除此股可轉債快取（若上方資料錯誤）", key=f"clear_cb_{stock_code}", type="secondary"):
+                try:
+                    import sqlite3
+                    conn = sqlite3.connect(db_path)
+                    conn.execute("DELETE FROM cb_cache WHERE stock_code=?", (stock_code,))
+                    conn.commit()
+                    conn.close()
+                    st.success("✔ 已清除快取，請關閉並重新開啟此個股，系統將重新查詢。")
+                except Exception as e:
+                    st.error(f"清除失敗：{e}")
+
+
         # ── 手動新增/修正可轉債資料（永久寫入 SQLite）──────────────────
         with st.expander("✏️ 手動新增／修正可轉債資料（若上方資料缺漏或錯誤）"):
             st.caption("填寫後按「儲存」，資料將永久存入資料庫，下次自動顯示。")
